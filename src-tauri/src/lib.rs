@@ -94,6 +94,7 @@ fn build_key_map() -> HashMap<String, Key> {
     map.insert("End".into(), Key::End);
     map.insert("PageUp".into(), Key::PageUp);
     map.insert("PageDown".into(), Key::PageDown);
+    #[cfg(not(target_os = "macos"))]
     map.insert("Insert".into(), Key::Insert);
     map.insert("Delete".into(), Key::Delete);
     map.insert("Enter".into(), Key::Return);
@@ -122,8 +123,11 @@ fn build_key_map() -> HashMap<String, Key> {
     map.insert("F11".into(), Key::F11);
     map.insert("F12".into(), Key::F12);
     map.insert("CapsLock".into(), Key::CapsLock);
+    #[cfg(not(target_os = "macos"))]
     map.insert("NumLock".into(), Key::Numlock);
+    #[cfg(not(target_os = "macos"))]
     map.insert("PrintScreen".into(), Key::PrintScr);
+    #[cfg(not(target_os = "macos"))]
     map.insert("Pause".into(), Key::Pause);
     map.insert("Numpad0".into(), Key::Numpad0);
     map.insert("Numpad1".into(), Key::Numpad1);
