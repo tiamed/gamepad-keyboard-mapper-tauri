@@ -11,6 +11,7 @@ import './GamepadVisual.css'
 
 interface GamepadVisualProps {
   gamepad: Gamepad | null
+  pressedButtons?: Set<number>
   onButtonClick: (buttonIndex: number, buttonName: GamepadButton) => void
   onAxisClick: (axisIndex: number, axisName: GamepadAxis) => void
 }
@@ -26,6 +27,7 @@ interface AxisState {
 
 export function GamepadVisual({
   gamepad,
+  pressedButtons,
   onButtonClick,
   onAxisClick,
 }: GamepadVisualProps) {
@@ -87,7 +89,8 @@ export function GamepadVisual({
 
   const getButtonClass = (index: number, baseClass: string) => {
     const isPressed = buttonStates[index]?.pressed ?? false
-    return `${baseClass} ${isPressed ? 'pressed' : ''}`
+    const isBackendPressed = pressedButtons?.has(index) ?? false
+    return `${baseClass} ${isPressed || isBackendPressed ? 'pressed' : ''}`
   }
 
   return (

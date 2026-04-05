@@ -45,6 +45,7 @@ function App() {
   } | null>(null)
   const [toasts, setToasts] = useState<{ id: string; msg: string; type: 'info' | 'error' | 'success' }[]>([])
   const [debugInfo, setDebugInfo] = useState<string>('')
+  const [pressedButtons, setPressedButtons] = useState<Set<number>>(new Set())
 
   const addToast = useCallback((msg: string, type: 'info' | 'error' | 'success' = 'info') => {
     const id = generateId()
@@ -121,6 +122,24 @@ function App() {
       addToast(`Backend error: ${e}`, 'error')
     })
   }, [addToast])
+
+  useEffect(() => {
+    const unlisten = listen<{ button_index: number; pressed: boolean }>('button_event', (event) => {
+      const { button_index, pressed } = event.payload
+      setPressedButtons(prev => {
+        const newSet = new Set(prev)
+        if (pressed) {
+          newSet.add(button_index)
+        } else {
+          newSet.delete(button_index)
+        }
+        return newSet
+      })
+    })
+    return () => {
+      unlisten.then(fn => fn())
+    }
+  }, [])
 
   const handleToggleEnabled = async () => {
     const newEnabled = !state.enabled
@@ -239,6 +258,7 @@ function App() {
         <h2 className="section-title">Controller</h2>
         <GamepadVisual
           gamepad={gamepad}
+          pressedButtons={pressedButtons}
           onButtonClick={handleButtonClick}
           onAxisClick={handleAxisClick}
         />

@@ -350,7 +350,6 @@
 }
 
 .face-btn.pressed {
-  transform: scale(0.95);
   box-shadow: var(--shadow-glow);
 }
 
@@ -362,6 +361,7 @@
 }
 
 .face-y.pressed {
+  transform: translateX(-50%) scale(0.95);
   background-color: var(--color-button-y);
   border-color: var(--color-button-y);
   color: var(--color-text-primary);
@@ -375,6 +375,7 @@
 }
 
 .face-b.pressed {
+  transform: translateY(-50%) scale(0.95);
   background-color: var(--color-button-b);
   border-color: var(--color-button-b);
   color: var(--color-text-primary);
@@ -388,6 +389,7 @@
 }
 
 .face-x.pressed {
+  transform: translateY(-50%) scale(0.95);
   background-color: var(--color-button-x);
   border-color: var(--color-button-x);
   color: var(--color-text-primary);
@@ -401,6 +403,7 @@
 }
 
 .face-a.pressed {
+  transform: translateX(-50%) scale(0.95);
   background-color: var(--color-button-a);
   border-color: var(--color-button-a);
   color: var(--color-text-primary);
