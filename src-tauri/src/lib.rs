@@ -10,6 +10,8 @@ use tauri::{AppHandle, Emitter, State};
 #[cfg(windows)]
 mod xinput_polling {
     use super::*;
+    use std::mem::zeroed;
+    use std::sync::OnceLock;
 
     const XINPUT_GAMEPAD_DPAD_UP: u16 = 0x0001;
     const XINPUT_GAMEPAD_DPAD_DOWN: u16 = 0x0004;
