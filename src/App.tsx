@@ -19,6 +19,7 @@ import {
 } from './services/storage'
 import { setMappings } from './services/mapper'
 import { listen } from '@tauri-apps/api/event'
+import { invoke } from '@tauri-apps/api/core'
 import { GamepadVisual } from './components/GamepadVisual'
 import { MappingRow } from './components/MappingRow'
 import { KeyPicker } from './components/KeyPicker'
@@ -42,6 +43,14 @@ function App() {
     index: number
     name: GamepadButton | GamepadAxis
   } | null>(null)
+  const [toasts, setToasts] = useState<{ id: string; msg: string; type: 'info' | 'error' | 'success' }[]>([])
+  const [debugInfo, setDebugInfo] = useState<string>('')
+
+  const addToast = useCallback((msg: string, type: 'info' | 'error' | 'success' = 'info') => {
+    const id = generateId()
+    setToasts(prev => [...prev, { id, msg, type }])
+    setTimeout(() => setToasts(prev => prev.filter(t => t.id !== id)), 5000)
+  }, [])
 
   const refreshState = useCallback(async () => {
     const loaded = await loadMappings()
@@ -57,7 +66,6 @@ function App() {
     const unlisten = listen('gamepad_status', (event) => {
       const payload = event.payload as { status: 'connected' | 'disconnected', active: boolean }
       if (payload.status === 'connected' && payload.active) {
-        // Create a dummy gamepad object for UI compatibility
         const dummyGamepad: Gamepad = {
           id: 'Gamepad (Background)',
           index: 0,
@@ -69,14 +77,28 @@ function App() {
           vibrationActuator: undefined as unknown as Gamepad['vibrationActuator'],
         }
         setGamepad(dummyGamepad)
+        addToast('Gamepad detected!', 'success')
       } else {
         setGamepad(null)
+        addToast('Gamepad disconnected', 'error')
       }
     })
     return () => {
       unlisten.then(fn => fn())
     }
-  }, [])
+  }, [addToast])
+
+  useEffect(() => {
+    invoke<string[]>('list_gamepads').then(names => {
+      setDebugInfo(`gilrs sees: ${names.length ? names.join(', ') : 'none'}`)
+      if (names.length === 0) {
+        addToast('No gamepads found by backend. Check USB connection.', 'error')
+      }
+    }).catch(e => {
+      setDebugInfo(`list_gamepads error: ${e}`)
+      addToast(`Backend error: ${e}`, 'error')
+    })
+  }, [addToast])
 
   const handleToggleEnabled = async () => {
     const newEnabled = !state.enabled
@@ -163,6 +185,20 @@ function App() {
 
   return (
     <div className="app">
+      <div className="toast-container">
+        {toasts.map(t => (
+          <div key={t.id} className={`toast toast-${t.type}`}>
+            {t.msg}
+          </div>
+        ))}
+      </div>
+
+      {debugInfo && (
+        <div className="debug-panel">
+          <code>{debugInfo}</code>
+        </div>
+      )}
+
       <header className="app-header">
         <div className="app-title">
           <span className="app-icon">🎮</span>

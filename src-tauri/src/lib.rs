@@ -191,6 +191,17 @@ fn get_status(state: State<AppState>) -> (bool, usize, bool) {
 }
 
 #[tauri::command]
+fn list_gamepads() -> Vec<String> {
+    match Gilrs::new() {
+        Ok(gilrs) => gilrs
+            .gamepads()
+            .map(|(_id, gp)| gp.name().to_string())
+            .collect(),
+        Err(e) => vec![format!("gilrs init failed: {}", e)],
+    }
+}
+
+#[tauri::command]
 fn test_key(key_code: &str, state: State<AppState>) -> Result<(), String> {
     let key_map = state.key_map.lock().map_err(|e| e.to_string())?;
     let key =
@@ -243,18 +254,36 @@ fn gamepad_loop(app: AppHandle, state: Arc<AppState>) {
     }
 
     loop {
-        if let Some(event) = gilrs.next_event() {
+        while let Some(event) = gilrs.next_event() {
+            log::info!("Event received: {:?}", event.event);
+            let key_map = state.key_map.lock().unwrap();
             let mappings = state.mappings.read().unwrap();
             let enabled = *state.enabled.read().unwrap();
-            if !enabled {
-                continue;
-            }
-
-            let key_map = state.key_map.lock().unwrap();
 
             match event.event {
-                EventType::ButtonPressed(btn, _) => {
-                    log::info!("Button pressed: {:?} (gamepad {:?})", btn, event.id);
+                EventType::Connected => {
+                    log::info!("Gamepad connected (event): {:?}", event.id);
+                    if state.active_gamepad.read().unwrap().is_none() {
+                        *state.active_gamepad.write().unwrap() = Some(event.id);
+                        let _ = app.emit(
+                            "gamepad_status",
+                            serde_json::json!({"status": "connected", "active": true}),
+                        );
+                    }
+                }
+                EventType::Disconnected => {
+                    log::info!("Gamepad disconnected: {:?}", event.id);
+                    let active = state.active_gamepad.read().unwrap();
+                    if *active == Some(event.id) {
+                        drop(active);
+                        *state.active_gamepad.write().unwrap() = None;
+                        let _ = app.emit(
+                            "gamepad_status",
+                            serde_json::json!({"status": "disconnected", "active": false}),
+                        );
+                    }
+                }
+                EventType::ButtonPressed(btn, _) if enabled => {
                     let w3c_idx = match gilrs_btn_to_w3c(btn) {
                         Some(i) => i,
                         None => continue,
@@ -269,24 +298,26 @@ fn gamepad_loop(app: AppHandle, state: Arc<AppState>) {
                         log::info!("Gamepad connected via button press");
                     }
 
+                    log::info!("Button pressed: {:?} -> W3C {}", btn, w3c_idx);
                     for mapping in mappings.iter() {
                         if mapping.source_type == "button" && mapping.source_index == w3c_idx {
                             if let Some(key) = resolve_key(&mapping.key_code, &key_map) {
                                 if let Ok(mut enigo) = state.enigo.lock() {
                                     let _ = enigo.key(key, Direction::Press);
                                     pressed.insert(mapping.id.clone(), mapping.key_code.clone());
+                                    log::info!("Key pressed: {:?}", key);
                                 }
                             }
                         }
                     }
                 }
-                EventType::ButtonReleased(btn, _) => {
-                    log::info!("Button released: {:?} (gamepad {:?})", btn, event.id);
+                EventType::ButtonReleased(btn, _) if enabled => {
                     let w3c_idx = match gilrs_btn_to_w3c(btn) {
                         Some(i) => i,
                         None => continue,
                     };
 
+                    log::info!("Button released: {:?} -> W3C {}", btn, w3c_idx);
                     let to_release: Vec<String> = pressed
                         .iter()
                         .filter(|(id, _)| {
@@ -304,18 +335,13 @@ fn gamepad_loop(app: AppHandle, state: Arc<AppState>) {
                             if let Some(key) = resolve_key(&kc, &key_map) {
                                 if let Ok(mut enigo) = state.enigo.lock() {
                                     let _ = enigo.key(key, Direction::Release);
+                                    log::info!("Key released: {:?}", key);
                                 }
                             }
                         }
                     }
                 }
-                EventType::AxisChanged(axis, value, _) => {
-                    log::info!(
-                        "Axis changed: axis {:?} = {} (gamepad {:?})",
-                        axis,
-                        value,
-                        event.id
-                    );
+                EventType::AxisChanged(axis, value, _) if enabled => {
                     let dz = mappings
                         .iter()
                         .find(|m| {
@@ -381,33 +407,6 @@ fn gamepad_loop(app: AppHandle, state: Arc<AppState>) {
                     last_axes.insert(pos_key, value);
                     last_axes.insert(neg_key, value);
                 }
-                EventType::Connected => {
-                    log::info!("Gamepad connected: {:?}", event.id);
-                    if state.active_gamepad.read().unwrap().is_none() {
-                        *state.active_gamepad.write().unwrap() = Some(event.id);
-                        let _ = app.emit(
-                            "gamepad_status",
-                            serde_json::json!({"status": "connected", "active": true}),
-                        );
-                        log::info!("Set active gamepad to {:?}", event.id);
-                    }
-                }
-                EventType::Disconnected => {
-                    log::info!("Gamepad disconnected");
-                    for (_id, kc) in pressed.drain() {
-                        if let Some(key) = resolve_key(&kc, &key_map) {
-                            if let Ok(mut enigo) = state.enigo.lock() {
-                                let _ = enigo.key(key, Direction::Release);
-                            }
-                        }
-                    }
-                    last_axes.clear();
-                    *state.active_gamepad.write().unwrap() = None;
-                    let _ = app.emit(
-                        "gamepad_status",
-                        serde_json::json!({"status": "disconnected", "active": false}),
-                    );
-                }
                 _ => {}
             }
         }
@@ -445,6 +444,7 @@ pub fn run() {
             set_enabled,
             get_status,
             test_key,
+            list_gamepads,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
