@@ -35,24 +35,39 @@ fn gilrs_btn_to_w3c(btn: Button) -> Option<usize> {
 #[cfg(windows)]
 mod xinput_polling {
     use super::*;
-    use xinput;
+
+    const XINPUT_GAMEPAD_DPAD_UP: u16 = 0x0001;
+    const XINPUT_GAMEPAD_DPAD_DOWN: u16 = 0x0004;
+    const XINPUT_GAMEPAD_DPAD_LEFT: u16 = 0x0008;
+    const XINPUT_GAMEPAD_DPAD_RIGHT: u16 = 0x0002;
+    const XINPUT_GAMEPAD_START: u16 = 0x0010;
+    const XINPUT_GAMEPAD_BACK: u16 = 0x0020;
+    const XINPUT_GAMEPAD_LEFT_THUMB: u16 = 0x0040;
+    const XINPUT_GAMEPAD_RIGHT_THUMB: u16 = 0x0080;
+    const XINPUT_GAMEPAD_LEFT_SHOULDER: u16 = 0x0100;
+    const XINPUT_GAMEPAD_RIGHT_SHOULDER: u16 = 0x0200;
+    const XINPUT_GAMEPAD_GUIDE: u16 = 0x0400;
+    const XINPUT_GAMEPAD_A: u16 = 0x1000;
+    const XINPUT_GAMEPAD_B: u16 = 0x2000;
+    const XINPUT_GAMEPAD_X: u16 = 0x4000;
+    const XINPUT_GAMEPAD_Y: u16 = 0x8000;
 
     const XINPUT_BUTTON_MAP: [(u16, usize); 15] = [
-        (xinput::XINPUT_GAMEPAD_A, 0),
-        (xinput::XINPUT_GAMEPAD_B, 1),
-        (xinput::XINPUT_GAMEPAD_X, 2),
-        (xinput::XINPUT_GAMEPAD_Y, 3),
-        (xinput::XINPUT_GAMEPAD_LEFT_SHOULDER, 4),
-        (xinput::XINPUT_GAMEPAD_RIGHT_SHOULDER, 5),
-        (xinput::XINPUT_GAMEPAD_BACK, 8),
-        (xinput::XINPUT_GAMEPAD_START, 9),
-        (xinput::XINPUT_GAMEPAD_LEFT_THUMB, 10),
-        (xinput::XINPUT_GAMEPAD_RIGHT_THUMB, 11),
-        (xinput::XINPUT_GAMEPAD_DPAD_UP, 12),
-        (xinput::XINPUT_GAMEPAD_DPAD_DOWN, 13),
-        (xinput::XINPUT_GAMEPAD_DPAD_LEFT, 14),
-        (xinput::XINPUT_GAMEPAD_DPAD_RIGHT, 15),
-        (xinput::XINPUT_GAMEPAD_GUIDE, 16),
+        (XINPUT_GAMEPAD_A, 0),
+        (XINPUT_GAMEPAD_B, 1),
+        (XINPUT_GAMEPAD_X, 2),
+        (XINPUT_GAMEPAD_Y, 3),
+        (XINPUT_GAMEPAD_LEFT_SHOULDER, 4),
+        (XINPUT_GAMEPAD_RIGHT_SHOULDER, 5),
+        (XINPUT_GAMEPAD_BACK, 8),
+        (XINPUT_GAMEPAD_START, 9),
+        (XINPUT_GAMEPAD_LEFT_THUMB, 10),
+        (XINPUT_GAMEPAD_RIGHT_THUMB, 11),
+        (XINPUT_GAMEPAD_DPAD_UP, 12),
+        (XINPUT_GAMEPAD_DPAD_DOWN, 13),
+        (XINPUT_GAMEPAD_DPAD_LEFT, 14),
+        (XINPUT_GAMEPAD_DPAD_RIGHT, 15),
+        (XINPUT_GAMEPAD_GUIDE, 16),
     ];
 
     pub fn xinput_buttons_to_w3c(buttons: u16) -> Vec<usize> {
@@ -62,15 +77,12 @@ mod xinput_polling {
             .collect()
     }
 
-    /// Convert XInput state to axis values array [leftX, leftY, rightX, rightY, leftTrigger, rightTrigger]
-    /// Each axis value is normalized to -1.0..1.0.
     pub fn xinput_state_to_axes(state: &xinput::State) -> [f32; 6] {
         let gamepad = &state.gamepad;
         let left_x = gamepad.s_thumb_lx as f32 / 32767.0;
         let left_y = gamepad.s_thumb_ly as f32 / 32767.0;
         let right_x = gamepad.s_thumb_rx as f32 / 32767.0;
         let right_y = gamepad.s_thumb_ry as f32 / 32767.0;
-        // XInput triggers range 0-255, map to -1.0..1.0 to match gilrs axis mapping
         let left_trigger = (gamepad.b_left_trigger as f32 - 128.0) / 128.0;
         let right_trigger = (gamepad.b_right_trigger as f32 - 128.0) / 128.0;
         [
@@ -91,10 +103,10 @@ mod xinput_polling {
         enabled: bool,
         last_buttons: &mut u16,
         last_axes: &mut [f32; 6],
-    ) -> Result<(), xinput::Error> {
+    ) -> Result<(), Box<dyn std::error::Error>> {
         const DEADZONE: f32 = 0.15;
 
-        let state = xinput::get_state(0)?;
+        let state = xinput::get_state(0).map_err(|e| format!("XInput error: {}", e))?;
         let buttons = state.gamepad.buttons;
         let axes = xinput_state_to_axes(&state);
 
