@@ -97,11 +97,3 @@ npm run tauri build
 ### macOS
 ✅ Uses IOKit via gilrs
 ✅ No force feedback support
-
----
-
-## ✅ Known Working Controllers
-- Xbox 360 / One / Series S/X
-- Sony DualShock 4 / DualSense
-- Nintendo Switch Pro Controller
-- Most standard XInput / HID compatible controllers
