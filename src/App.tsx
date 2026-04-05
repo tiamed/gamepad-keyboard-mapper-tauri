@@ -12,7 +12,7 @@ import {
 } from './types'
 import {
   loadMappings,
-  toggleEnabled,
+  saveMappings,
   addMapping,
   removeMapping,
   updateMapping,
@@ -79,8 +79,17 @@ function App() {
   }, [])
 
   const handleToggleEnabled = async () => {
-    const newEnabled = await toggleEnabled()
+    const newEnabled = !state.enabled
     setState((prev) => ({ ...prev, enabled: newEnabled }))
+    try {
+      const { invoke } = await import('@tauri-apps/api/core')
+      await invoke('set_enabled', { enabled: newEnabled })
+      saveMappings({ ...state, enabled: newEnabled }).catch((e) =>
+        console.error('Failed to save enabled state to storage:', e)
+      )
+    } catch (e) {
+      console.error('Failed to sync enabled state:', e)
+    }
   }
 
   const handleDeleteMapping = async (id: string) => {

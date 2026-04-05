@@ -204,7 +204,10 @@ fn test_key(key_code: &str, state: State<AppState>) -> Result<(), String> {
 
 fn gamepad_loop(app: AppHandle, state: Arc<AppState>) {
     let mut gilrs: Gilrs = match Gilrs::new() {
-        Ok(g) => g,
+        Ok(g) => {
+            log::info!("gilrs initialized successfully");
+            g
+        }
         Err(e) => {
             log::error!("Failed to init gilrs: {}", e);
             return;
@@ -213,6 +216,31 @@ fn gamepad_loop(app: AppHandle, state: Arc<AppState>) {
 
     let mut pressed: HashMap<String, String> = HashMap::new();
     let mut last_axes: HashMap<String, f32> = HashMap::new();
+
+    // Scan for already-connected gamepads
+    let mut gamepad_count = 0;
+    for (id, gp) in gilrs.gamepads() {
+        gamepad_count += 1;
+        log::info!(
+            "Found already-connected gamepad {}: {:?} ({})",
+            gamepad_count,
+            id,
+            gp.name()
+        );
+        if gamepad_count == 1 {
+            *state.active_gamepad.write().unwrap() = Some(id);
+            let _ = app.emit(
+                "gamepad_status",
+                serde_json::json!({"status": "connected", "active": true}),
+            );
+            log::info!("Set active gamepad to {:?}", id);
+        }
+    }
+    if gamepad_count == 0 {
+        log::info!("No gamepads connected at startup");
+    } else {
+        log::info!("Total gamepads found at startup: {}", gamepad_count);
+    }
 
     loop {
         if let Some(event) = gilrs.next_event() {
@@ -226,6 +254,7 @@ fn gamepad_loop(app: AppHandle, state: Arc<AppState>) {
 
             match event.event {
                 EventType::ButtonPressed(btn, _) => {
+                    log::info!("Button pressed: {:?} (gamepad {:?})", btn, event.id);
                     let w3c_idx = match gilrs_btn_to_w3c(btn) {
                         Some(i) => i,
                         None => continue,
@@ -237,6 +266,7 @@ fn gamepad_loop(app: AppHandle, state: Arc<AppState>) {
                             "gamepad_status",
                             serde_json::json!({"status": "connected", "active": true}),
                         );
+                        log::info!("Gamepad connected via button press");
                     }
 
                     for mapping in mappings.iter() {
@@ -251,6 +281,7 @@ fn gamepad_loop(app: AppHandle, state: Arc<AppState>) {
                     }
                 }
                 EventType::ButtonReleased(btn, _) => {
+                    log::info!("Button released: {:?} (gamepad {:?})", btn, event.id);
                     let w3c_idx = match gilrs_btn_to_w3c(btn) {
                         Some(i) => i,
                         None => continue,
@@ -279,6 +310,12 @@ fn gamepad_loop(app: AppHandle, state: Arc<AppState>) {
                     }
                 }
                 EventType::AxisChanged(axis, value, _) => {
+                    log::info!(
+                        "Axis changed: axis {:?} = {} (gamepad {:?})",
+                        axis,
+                        value,
+                        event.id
+                    );
                     let dz = mappings
                         .iter()
                         .find(|m| {
@@ -344,7 +381,19 @@ fn gamepad_loop(app: AppHandle, state: Arc<AppState>) {
                     last_axes.insert(pos_key, value);
                     last_axes.insert(neg_key, value);
                 }
+                EventType::Connected => {
+                    log::info!("Gamepad connected: {:?}", event.id);
+                    if state.active_gamepad.read().unwrap().is_none() {
+                        *state.active_gamepad.write().unwrap() = Some(event.id);
+                        let _ = app.emit(
+                            "gamepad_status",
+                            serde_json::json!({"status": "connected", "active": true}),
+                        );
+                        log::info!("Set active gamepad to {:?}", event.id);
+                    }
+                }
                 EventType::Disconnected => {
+                    log::info!("Gamepad disconnected");
                     for (_id, kc) in pressed.drain() {
                         if let Some(key) = resolve_key(&kc, &key_map) {
                             if let Ok(mut enigo) = state.enigo.lock() {
