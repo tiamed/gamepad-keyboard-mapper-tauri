@@ -171,19 +171,19 @@ fn resolve_key(name: &str, key_map: &HashMap<String, Key>) -> Option<Key> {
 }
 
 #[tauri::command]
-fn set_mappings(mappings: Vec<Mapping>, state: State<AppState>) {
+fn set_mappings(mappings: Vec<Mapping>, state: State<'_, Arc<AppState>>) {
     let mut m = state.mappings.write().unwrap();
     *m = mappings;
 }
 
 #[tauri::command]
-fn set_enabled(enabled: bool, state: State<AppState>) {
+fn set_enabled(enabled: bool, state: State<'_, Arc<AppState>>) {
     let mut e = state.enabled.write().unwrap();
     *e = enabled;
 }
 
 #[tauri::command]
-fn get_status(state: State<AppState>) -> (bool, usize, bool) {
+fn get_status(state: State<'_, Arc<AppState>>) -> (bool, usize, bool) {
     let enabled = *state.enabled.read().unwrap();
     let len = state.mappings.read().unwrap().len();
     let active = state.active_gamepad.read().unwrap().is_some();
@@ -191,7 +191,7 @@ fn get_status(state: State<AppState>) -> (bool, usize, bool) {
 }
 
 #[tauri::command]
-fn list_gamepads(state: State<AppState>) -> Vec<String> {
+fn list_gamepads(state: State<'_, Arc<AppState>>) -> Vec<String> {
     let active = state.active_gamepad.read().unwrap();
     match *active {
         Some(id) => vec![format!("Active gamepad ID: {:?}", id)],
@@ -200,7 +200,7 @@ fn list_gamepads(state: State<AppState>) -> Vec<String> {
 }
 
 #[tauri::command]
-fn test_key(key_code: &str, state: State<AppState>) -> Result<(), String> {
+fn test_key(key_code: &str, state: State<'_, Arc<AppState>>) -> Result<(), String> {
     let key_map = state.key_map.lock().map_err(|e| e.to_string())?;
     let key =
         resolve_key(key_code, &key_map).ok_or_else(|| format!("Unknown key: {}", key_code))?;
@@ -471,7 +471,7 @@ pub fn run() {
 
     tauri::Builder::default()
         .plugin(tauri_plugin_store::Builder::default().build())
-        .manage(state)
+        .manage(Arc::clone(&state))
         .setup(move |app| {
             let handle = app.handle().clone();
             thread::spawn(move || gamepad_loop(handle, state_clone));
