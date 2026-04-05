@@ -28,7 +28,7 @@ mod xinput_polling {
     const XINPUT_GAMEPAD_X: u16 = 0x4000;
     const XINPUT_GAMEPAD_Y: u16 = 0x8000;
 
-    const XINPUT_BUTTON_MAP: [(u16, usize); 14] = [
+    pub const XINPUT_BUTTON_MAP: [(u16, usize); 14] = [
         (XINPUT_GAMEPAD_A, 0),
         (XINPUT_GAMEPAD_B, 1),
         (XINPUT_GAMEPAD_X, 2),
@@ -86,7 +86,7 @@ mod xinput_polling {
         enabled: bool,
         last_buttons: &mut u16,
         last_axes: &mut [f32; 6],
-    ) -> Result<(), String> {
+    ) -> Result<(u16, [f32; 6]), String> {
         const DEADZONE: f32 = 0.15;
         const XINPUT_DEADZONE: f32 = 7849.0;
 
@@ -220,7 +220,7 @@ mod xinput_polling {
         }
 
         *last_buttons = buttons;
-        Ok(())
+        Ok((buttons, axes))
     }
 }
 
@@ -708,7 +708,10 @@ fn gamepad_loop(app: AppHandle, state: Arc<AppState>) {
                 &mut last_xinput_axes,
             ) {
                 if state.active_gamepad.read().unwrap().is_none() {
-                    *state.active_gamepad.write().unwrap() = Some(gilrs::GamepadId(0));
+                    // Create a dummy GamepadId for XInput (Windows doesn't use gilrs)
+                    // GamepadId is a tuple struct around usize, use transmute to create it
+                    let dummy_id: gilrs::GamepadId = unsafe { std::mem::transmute(0usize) };
+                    *state.active_gamepad.write().unwrap() = Some(dummy_id);
                     let _ = app.emit(
                         "gamepad_status",
                         serde_json::json!({"status": "connected", "active": true}),
