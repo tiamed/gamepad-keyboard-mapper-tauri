@@ -6,8 +6,218 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex, RwLock};
 use std::thread;
 use tauri::{AppHandle, Emitter, State};
+
 #[cfg(windows)]
-use xinput;
+mod xinput_polling {
+    use super::*;
+
+    const XINPUT_GAMEPAD_DPAD_UP: u16 = 0x0001;
+    const XINPUT_GAMEPAD_DPAD_DOWN: u16 = 0x0004;
+    const XINPUT_GAMEPAD_DPAD_LEFT: u16 = 0x0008;
+    const XINPUT_GAMEPAD_DPAD_RIGHT: u16 = 0x0002;
+    const XINPUT_GAMEPAD_START: u16 = 0x0010;
+    const XINPUT_GAMEPAD_BACK: u16 = 0x0020;
+    const XINPUT_GAMEPAD_LEFT_THUMB: u16 = 0x0040;
+    const XINPUT_GAMEPAD_RIGHT_THUMB: u16 = 0x0080;
+    const XINPUT_GAMEPAD_LEFT_SHOULDER: u16 = 0x0100;
+    const XINPUT_GAMEPAD_RIGHT_SHOULDER: u16 = 0x0200;
+    const XINPUT_GAMEPAD_A: u16 = 0x1000;
+    const XINPUT_GAMEPAD_B: u16 = 0x2000;
+    const XINPUT_GAMEPAD_X: u16 = 0x4000;
+    const XINPUT_GAMEPAD_Y: u16 = 0x8000;
+
+    const XINPUT_BUTTON_MAP: [(u16, usize); 14] = [
+        (XINPUT_GAMEPAD_A, 0),
+        (XINPUT_GAMEPAD_B, 1),
+        (XINPUT_GAMEPAD_X, 2),
+        (XINPUT_GAMEPAD_Y, 3),
+        (XINPUT_GAMEPAD_LEFT_SHOULDER, 4),
+        (XINPUT_GAMEPAD_RIGHT_SHOULDER, 5),
+        (XINPUT_GAMEPAD_BACK, 8),
+        (XINPUT_GAMEPAD_START, 9),
+        (XINPUT_GAMEPAD_LEFT_THUMB, 10),
+        (XINPUT_GAMEPAD_RIGHT_THUMB, 11),
+        (XINPUT_GAMEPAD_DPAD_UP, 12),
+        (XINPUT_GAMEPAD_DPAD_DOWN, 13),
+        (XINPUT_GAMEPAD_DPAD_LEFT, 14),
+        (XINPUT_GAMEPAD_DPAD_RIGHT, 15),
+    ];
+
+    #[repr(C)]
+    #[derive(Clone, Copy)]
+    struct XInputGamepad {
+        buttons: u16,
+        left_trigger: u8,
+        right_trigger: u8,
+        thumb_lx: i16,
+        thumb_ly: i16,
+        thumb_rx: i16,
+        thumb_ry: i16,
+    }
+
+    #[repr(C)]
+    struct XInputState {
+        packet_number: u32,
+        gamepad: XInputGamepad,
+    }
+
+    type XInputGetStateFn = unsafe extern "system" fn(u32, *mut XInputState) -> u32;
+
+    fn get_xinput_fn() -> Option<XInputGetStateFn> {
+        static FN: OnceLock<Option<XInputGetStateFn>> = OnceLock::new();
+        *FN.get_or_init(|| {
+            let lib = libloading::Library::new("xinput1_4.dll")
+                .or_else(|_| libloading::Library::new("xinput9_1_0.dll"))
+                .ok()?;
+            unsafe { lib.get(b"XInputGetState").ok() }
+        })
+    }
+
+    pub fn poll_xinput(
+        mappings: &[Mapping],
+        key_map: &HashMap<String, Key>,
+        pressed: &mut HashMap<String, String>,
+        enigo: &Mutex<Enigo>,
+        enabled: bool,
+        last_buttons: &mut u16,
+        last_axes: &mut [f32; 6],
+    ) -> Result<(), String> {
+        const DEADZONE: f32 = 0.15;
+        const XINPUT_DEADZONE: f32 = 7849.0;
+
+        let get_state = get_xinput_fn().ok_or("XInput not available")?;
+        let mut state: XInputState = unsafe { zeroed() };
+        let result = unsafe { get_state(0, &mut state) };
+        if result != 0 {
+            return Err(format!("XInputGetState failed: {}", result));
+        }
+
+        let buttons = state.gamepad.buttons;
+        let mut axes = [0.0f32; 6];
+        axes[0] = state.gamepad.thumb_lx as f32 / 32767.0;
+        axes[1] = state.gamepad.thumb_ly as f32 / 32767.0;
+        axes[2] = state.gamepad.thumb_rx as f32 / 32767.0;
+        axes[3] = state.gamepad.thumb_ry as f32 / 32767.0;
+        axes[4] = state.gamepad.left_trigger as f32 / 255.0;
+        axes[5] = state.gamepad.right_trigger as f32 / 255.0;
+
+        let changed = buttons ^ *last_buttons;
+        for &(mask, w3c_idx) in XINPUT_BUTTON_MAP.iter() {
+            if changed & mask == 0 {
+                continue;
+            }
+            let is_now = buttons & mask != 0;
+            if !enabled {
+                continue;
+            }
+            if is_now {
+                for mapping in mappings.iter() {
+                    if mapping.source_type == "button" && mapping.source_index == w3c_idx {
+                        if let Some(key) = resolve_key(&mapping.key_code, key_map) {
+                            if let Ok(mut en) = enigo.lock() {
+                                let _ = en.key(key, Direction::Press);
+                                pressed.insert(mapping.id.clone(), mapping.key_code.clone());
+                            }
+                        }
+                    }
+                }
+            } else {
+                let to_release: Vec<String> = pressed
+                    .iter()
+                    .filter(|(mid, _)| {
+                        mappings.iter().any(|m| {
+                            m.id == **mid && m.source_type == "button" && m.source_index == w3c_idx
+                        })
+                    })
+                    .map(|(mid, _)| mid.clone())
+                    .collect();
+                for mid in to_release {
+                    if let Some(kc) = pressed.remove(&mid) {
+                        if let Some(key) = resolve_key(&kc, key_map) {
+                            if let Ok(mut en) = enigo.lock() {
+                                let _ = en.key(key, Direction::Release);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        if enabled {
+            for i in 0..6 {
+                let value = if i < 4 {
+                    let v = axes[i];
+                    if v.abs() < XINPUT_DEADZONE / 32767.0 {
+                        0.0
+                    } else {
+                        v
+                    }
+                } else {
+                    axes[i]
+                };
+                let last = last_axes[i];
+                if (value - last).abs() > 0.01 {
+                    if last <= DEADZONE && value > DEADZONE {
+                        if let Some(m) = mappings
+                            .iter()
+                            .find(|m| m.source_type == "axis_positive" && m.source_index == i)
+                        {
+                            if let Some(key) = resolve_key(&m.key_code, key_map) {
+                                if let Ok(mut en) = enigo.lock() {
+                                    let _ = en.key(key, Direction::Press);
+                                    pressed.insert(m.id.clone(), m.key_code.clone());
+                                }
+                            }
+                        }
+                    }
+                    if last > DEADZONE && value <= DEADZONE {
+                        if let Some(m) = mappings
+                            .iter()
+                            .find(|m| m.source_type == "axis_positive" && m.source_index == i)
+                        {
+                            if let Some(key) = resolve_key(&m.key_code, key_map) {
+                                if let Ok(mut en) = enigo.lock() {
+                                    let _ = en.key(key, Direction::Release);
+                                    pressed.remove(&m.id);
+                                }
+                            }
+                        }
+                    }
+                    if last >= -DEADZONE && value < -DEADZONE {
+                        if let Some(m) = mappings
+                            .iter()
+                            .find(|m| m.source_type == "axis_negative" && m.source_index == i)
+                        {
+                            if let Some(key) = resolve_key(&m.key_code, key_map) {
+                                if let Ok(mut en) = enigo.lock() {
+                                    let _ = en.key(key, Direction::Press);
+                                    pressed.insert(m.id.clone(), m.key_code.clone());
+                                }
+                            }
+                        }
+                    }
+                    if last < -DEADZONE && value >= -DEADZONE {
+                        if let Some(m) = mappings
+                            .iter()
+                            .find(|m| m.source_type == "axis_negative" && m.source_index == i)
+                        {
+                            if let Some(key) = resolve_key(&m.key_code, key_map) {
+                                if let Ok(mut en) = enigo.lock() {
+                                    let _ = en.key(key, Direction::Release);
+                                    pressed.remove(&m.id);
+                                }
+                            }
+                        }
+                    }
+                    last_axes[i] = value;
+                }
+            }
+        }
+
+        *last_buttons = buttons;
+        Ok(())
+    }
+}
 
 /// Convert gilrs Button enum to W3C Gamepad API button index.
 /// Frontend stores mappings using W3C indices, so we must convert.
@@ -29,196 +239,6 @@ fn gilrs_btn_to_w3c(btn: Button) -> Option<usize> {
         Button::DPadRight => Some(15),
         Button::Mode => Some(16), // Home/Guide
         _ => None,
-    }
-}
-
-#[cfg(windows)]
-mod xinput_polling {
-    use super::*;
-
-    const XINPUT_GAMEPAD_DPAD_UP: u16 = 0x0001;
-    const XINPUT_GAMEPAD_DPAD_DOWN: u16 = 0x0004;
-    const XINPUT_GAMEPAD_DPAD_LEFT: u16 = 0x0008;
-    const XINPUT_GAMEPAD_DPAD_RIGHT: u16 = 0x0002;
-    const XINPUT_GAMEPAD_START: u16 = 0x0010;
-    const XINPUT_GAMEPAD_BACK: u16 = 0x0020;
-    const XINPUT_GAMEPAD_LEFT_THUMB: u16 = 0x0040;
-    const XINPUT_GAMEPAD_RIGHT_THUMB: u16 = 0x0080;
-    const XINPUT_GAMEPAD_LEFT_SHOULDER: u16 = 0x0100;
-    const XINPUT_GAMEPAD_RIGHT_SHOULDER: u16 = 0x0200;
-    const XINPUT_GAMEPAD_GUIDE: u16 = 0x0400;
-    const XINPUT_GAMEPAD_A: u16 = 0x1000;
-    const XINPUT_GAMEPAD_B: u16 = 0x2000;
-    const XINPUT_GAMEPAD_X: u16 = 0x4000;
-    const XINPUT_GAMEPAD_Y: u16 = 0x8000;
-
-    const XINPUT_BUTTON_MAP: [(u16, usize); 15] = [
-        (XINPUT_GAMEPAD_A, 0),
-        (XINPUT_GAMEPAD_B, 1),
-        (XINPUT_GAMEPAD_X, 2),
-        (XINPUT_GAMEPAD_Y, 3),
-        (XINPUT_GAMEPAD_LEFT_SHOULDER, 4),
-        (XINPUT_GAMEPAD_RIGHT_SHOULDER, 5),
-        (XINPUT_GAMEPAD_BACK, 8),
-        (XINPUT_GAMEPAD_START, 9),
-        (XINPUT_GAMEPAD_LEFT_THUMB, 10),
-        (XINPUT_GAMEPAD_RIGHT_THUMB, 11),
-        (XINPUT_GAMEPAD_DPAD_UP, 12),
-        (XINPUT_GAMEPAD_DPAD_DOWN, 13),
-        (XINPUT_GAMEPAD_DPAD_LEFT, 14),
-        (XINPUT_GAMEPAD_DPAD_RIGHT, 15),
-        (XINPUT_GAMEPAD_GUIDE, 16),
-    ];
-
-    pub fn xinput_buttons_to_w3c(buttons: u16) -> Vec<usize> {
-        XINPUT_BUTTON_MAP
-            .iter()
-            .filter_map(|&(mask, idx)| if buttons & mask != 0 { Some(idx) } else { None })
-            .collect()
-    }
-
-    pub fn xinput_state_to_axes(state: &xinput::State) -> [f32; 6] {
-        let gamepad = &state.gamepad;
-        let left_x = gamepad.s_thumb_lx as f32 / 32767.0;
-        let left_y = gamepad.s_thumb_ly as f32 / 32767.0;
-        let right_x = gamepad.s_thumb_rx as f32 / 32767.0;
-        let right_y = gamepad.s_thumb_ry as f32 / 32767.0;
-        let left_trigger = (gamepad.b_left_trigger as f32 - 128.0) / 128.0;
-        let right_trigger = (gamepad.b_right_trigger as f32 - 128.0) / 128.0;
-        [
-            left_x,
-            left_y,
-            right_x,
-            right_y,
-            left_trigger,
-            right_trigger,
-        ]
-    }
-
-    pub fn poll_xinput(
-        mappings: &[super::Mapping],
-        key_map: &std::collections::HashMap<String, super::Key>,
-        pressed: &mut std::collections::HashMap<String, String>,
-        enigo: &std::sync::Mutex<super::Enigo>,
-        enabled: bool,
-        last_buttons: &mut u16,
-        last_axes: &mut [f32; 6],
-    ) -> Result<(), Box<dyn std::error::Error>> {
-        const DEADZONE: f32 = 0.15;
-
-        let state = xinput::get_state(0).map_err(|e| format!("XInput error: {}", e))?;
-        let buttons = state.gamepad.buttons;
-        let axes = xinput_state_to_axes(&state);
-
-        let changed = buttons ^ *last_buttons;
-        for &(mask, w3c_index) in XINPUT_BUTTON_MAP.iter() {
-            if changed & mask == 0 {
-                continue;
-            }
-            let is_pressed = buttons & mask != 0;
-            if !enabled {
-                continue;
-            }
-            if is_pressed {
-                for mapping in mappings.iter() {
-                    if mapping.source_type == "button" && mapping.source_index == w3c_index {
-                        if let Some(key) = super::resolve_key(&mapping.key_code, key_map) {
-                            if let Ok(mut enigo) = enigo.lock() {
-                                let _ = enigo.key(key, super::Direction::Press);
-                                pressed.insert(mapping.id.clone(), mapping.key_code.clone());
-                            }
-                        }
-                    }
-                }
-            } else {
-                let to_release: Vec<String> = pressed
-                    .iter()
-                    .filter(|(mid, _)| {
-                        mappings.iter().any(|m| {
-                            m.id == **mid
-                                && m.source_type == "button"
-                                && m.source_index == w3c_index
-                        })
-                    })
-                    .map(|(mid, _)| mid.clone())
-                    .collect();
-                for mid in to_release {
-                    if let Some(kc) = pressed.remove(&mid) {
-                        if let Some(key) = super::resolve_key(&kc, key_map) {
-                            if let Ok(mut enigo) = enigo.lock() {
-                                let _ = enigo.key(key, super::Direction::Release);
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        if enabled {
-            for i in 0..6 {
-                let value = axes[i];
-                let last = last_axes[i];
-                if (value - last).abs() > 0.01 {
-                    if last <= DEADZONE && value > DEADZONE {
-                        if let Some(m) = mappings
-                            .iter()
-                            .find(|m| m.source_type == "axis_positive" && m.source_index == i)
-                        {
-                            if let Some(key) = super::resolve_key(&m.key_code, key_map) {
-                                if let Ok(mut enigo) = enigo.lock() {
-                                    let _ = enigo.key(key, super::Direction::Press);
-                                    pressed.insert(m.id.clone(), m.key_code.clone());
-                                }
-                            }
-                        }
-                    }
-                    if last > DEADZONE && value <= DEADZONE {
-                        if let Some(m) = mappings
-                            .iter()
-                            .find(|m| m.source_type == "axis_positive" && m.source_index == i)
-                        {
-                            if let Some(key) = super::resolve_key(&m.key_code, key_map) {
-                                if let Ok(mut enigo) = enigo.lock() {
-                                    let _ = enigo.key(key, super::Direction::Release);
-                                    pressed.remove(&m.id);
-                                }
-                            }
-                        }
-                    }
-                    if last >= -DEADZONE && value < -DEADZONE {
-                        if let Some(m) = mappings
-                            .iter()
-                            .find(|m| m.source_type == "axis_negative" && m.source_index == i)
-                        {
-                            if let Some(key) = super::resolve_key(&m.key_code, key_map) {
-                                if let Ok(mut enigo) = enigo.lock() {
-                                    let _ = enigo.key(key, super::Direction::Press);
-                                    pressed.insert(m.id.clone(), m.key_code.clone());
-                                }
-                            }
-                        }
-                    }
-                    if last < -DEADZONE && value >= -DEADZONE {
-                        if let Some(m) = mappings
-                            .iter()
-                            .find(|m| m.source_type == "axis_negative" && m.source_index == i)
-                        {
-                            if let Some(key) = super::resolve_key(&m.key_code, key_map) {
-                                if let Ok(mut enigo) = enigo.lock() {
-                                    let _ = enigo.key(key, super::Direction::Release);
-                                    pressed.remove(&m.id);
-                                }
-                            }
-                        }
-                    }
-                    last_axes[i] = value;
-                }
-            }
-        }
-
-        *last_buttons = buttons;
-        *last_axes = axes;
-        Ok(())
     }
 }
 
@@ -474,21 +494,16 @@ fn gamepad_loop(app: AppHandle, state: Arc<AppState>) {
         let key_map = state.key_map.lock().unwrap();
 
         #[cfg(windows)]
-        let xinput_connected = {
-            use xinput_polling::poll_xinput;
-            match poll_xinput(
-                &mappings,
-                &key_map,
-                &mut pressed,
-                &state.enigo,
-                enabled,
-                &mut last_xinput_buttons,
-                &mut last_xinput_axes,
-            ) {
-                Ok(()) => true,
-                Err(_) => false,
-            }
-        };
+        let xinput_connected = xinput_polling::poll_xinput(
+            &mappings,
+            &key_map,
+            &mut pressed,
+            &state.enigo,
+            enabled,
+            &mut last_xinput_buttons,
+            &mut last_xinput_axes,
+        )
+        .is_ok();
         #[cfg(not(windows))]
         let xinput_connected = false;
 
@@ -678,62 +693,6 @@ fn gamepad_loop(app: AppHandle, state: Arc<AppState>) {
                         axis_vals[i] = value;
                     }
                 }
-            }
-        }
-
-        #[cfg(windows)]
-        {
-            if let Err(e) = xinput_polling::poll_xinput(
-                &mappings,
-                &key_map,
-                &mut pressed,
-                &state.enigo,
-                enabled,
-                &mut last_xinput_buttons,
-                &mut last_xinput_axes,
-            ) {
-                if state.active_gamepad.read().unwrap().is_some() {
-                    *state.active_gamepad.write().unwrap() = None;
-                    let _ = app.emit(
-                        "gamepad_status",
-                        serde_json::json!({"status": "disconnected", "active": false}),
-                    );
-                }
-            } else if state.active_gamepad.read().unwrap().is_none() {
-                *state.active_gamepad.write().unwrap() = Some(gilrs::GamepadId(0));
-                let _ = app.emit(
-                    "gamepad_status",
-                    serde_json::json!({"status": "connected", "active": true}),
-                );
-                log::info!("XInput gamepad detected");
-            }
-        }
-
-        #[cfg(windows)]
-        {
-            if let Err(e) = xinput_polling::poll_xinput(
-                &mappings,
-                &key_map,
-                &mut pressed,
-                &state.enigo,
-                enabled,
-                &mut last_xinput_buttons,
-                &mut last_xinput_axes,
-            ) {
-                if state.active_gamepad.read().unwrap().is_some() {
-                    *state.active_gamepad.write().unwrap() = None;
-                    let _ = app.emit(
-                        "gamepad_status",
-                        serde_json::json!({"status": "disconnected", "active": false}),
-                    );
-                }
-            } else if state.active_gamepad.read().unwrap().is_none() {
-                *state.active_gamepad.write().unwrap() = Some(gilrs::GamepadId(0));
-                let _ = app.emit(
-                    "gamepad_status",
-                    serde_json::json!({"status": "connected", "active": true}),
-                );
-                log::info!("XInput gamepad detected");
             }
         }
 
