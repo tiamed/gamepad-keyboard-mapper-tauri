@@ -1,0 +1,106 @@
+.key-picker-trigger {
+  display: flex;
+  gap: var(--space-2);
+  align-items: center;
+}
+
+.key-picker-btn {
+  padding: var(--space-2) var(--space-3);
+  background-color: var(--color-accent-primary);
+  color: var(--color-text-primary);
+  border: none;
+  border-radius: var(--radius-md);
+  font-size: var(--font-size-sm);
+  font-weight: var(--font-weight-medium);
+  cursor: pointer;
+  transition: background-color var(--transition-fast);
+}
+
+.key-picker-btn:hover {
+  background-color: var(--color-accent-primary-hover);
+}
+
+.key-picker-cancel {
+  padding: var(--space-2) var(--space-3);
+  background-color: transparent;
+  color: var(--color-text-secondary);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  font-size: var(--font-size-sm);
+  cursor: pointer;
+  transition: all var(--transition-fast);
+}
+
+.key-picker-cancel:hover {
+  color: var(--color-text-primary);
+  border-color: var(--color-border-hover);
+}
+
+.key-picker-listening {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 1000;
+}
+
+.key-picker-overlay {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background-color: rgba(13, 17, 23, 0.95);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.key-picker-prompt {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--space-4);
+  animation: keyPickerPulse 1.5s ease-in-out infinite;
+}
+
+@keyframes keyPickerPulse {
+  0%, 100% {
+    transform: scale(1);
+    opacity: 1;
+  }
+  50% {
+    transform: scale(1.05);
+    opacity: 0.9;
+  }
+}
+
+.key-picker-icon {
+  font-size: 48px;
+  line-height: 1;
+}
+
+.key-picker-text {
+  font-size: var(--font-size-lg);
+  font-weight: var(--font-weight-semibold);
+  color: var(--color-text-primary);
+  margin: 0;
+}
+
+.key-picker-cancel-btn {
+  padding: var(--space-2) var(--space-4);
+  background-color: var(--color-bg-tertiary);
+  color: var(--color-text-secondary);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  font-size: var(--font-size-sm);
+  cursor: pointer;
+  transition: all var(--transition-fast);
+}
+
+.key-picker-cancel-btn:hover {
+  background-color: var(--color-bg-hover);
+  color: var(--color-text-primary);
+  border-color: var(--color-border-hover);
+}

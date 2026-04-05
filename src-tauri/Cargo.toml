@@ -1,0 +1,30 @@
+[package]
+name = "gamepad-keyboard-mapper"
+version = "1.0.0"
+description = "Map gamepad buttons and sticks to keyboard keys"
+authors = ["you"]
+edition = "2021"
+
+[lib]
+name = "gamepad_keyboard_mapper_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+tauri-plugin-store = "2"
+enigo = "0.6"
+gilrs = "0.11"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+log = "0.4"
+env_logger = "0.11"
+
+[profile.release]
+opt-level = "z"
+lto = "thin"
+codegen-units = 1
+strip = true
+panic = "abort"
