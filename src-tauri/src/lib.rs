@@ -71,7 +71,12 @@ mod xinput_polling {
             let lib = libloading::Library::new("xinput1_4.dll")
                 .or_else(|_| libloading::Library::new("xinput9_1_0.dll"))
                 .ok()?;
-            unsafe { lib.get(b"XInputGetState").ok() }
+            // Leak the library so the function pointer remains valid forever
+            std::mem::forget(lib);
+            unsafe {
+                let sym: libloading::Symbol<XInputGetStateFn> = lib.get(b"XInputGetState").ok()?;
+                Some(*sym)
+            }
         })
     }
 
