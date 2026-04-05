@@ -241,6 +241,38 @@ fn gamepad_loop(app: AppHandle, state: Arc<AppState>) {
     let mut last_axis_values: HashMap<usize, [f32; 6]> = HashMap::new();
 
     loop {
+        // Process events first to update internal state cache (critical for Windows XInput)
+        while let Some(event) = gilrs.next_event() {
+            match event.event {
+                EventType::Connected => {
+                    log::info!("Gamepad connected (event): {:?}", event.id);
+                    if state.active_gamepad.read().unwrap().is_none() {
+                        *state.active_gamepad.write().unwrap() = Some(event.id);
+                        let _ = app.emit(
+                            "gamepad_status",
+                            serde_json::json!({"status": "connected", "active": true}),
+                        );
+                    }
+                }
+                EventType::Disconnected => {
+                    log::info!("Gamepad disconnected: {:?}", event.id);
+                    let active = state.active_gamepad.read().unwrap();
+                    if *active == Some(event.id) {
+                        drop(active);
+                        *state.active_gamepad.write().unwrap() = None;
+                        let _ = app.emit(
+                            "gamepad_status",
+                            serde_json::json!({"status": "disconnected", "active": false}),
+                        );
+                    }
+                    let eid: usize = event.id.into();
+                    last_button_states.remove(&eid);
+                    last_axis_values.remove(&eid);
+                }
+                _ => {}
+            }
+        }
+
         let mappings = state.mappings.read().unwrap();
         let enabled = *state.enabled.read().unwrap();
         let key_map = state.key_map.lock().unwrap();
@@ -298,8 +330,9 @@ fn gamepad_loop(app: AppHandle, state: Arc<AppState>) {
                     let was = btn_states.get(&btn).copied().unwrap_or(false);
 
                     if is_now && !was {
+                        log::info!("Button {:?} pressed", btn);
                         if let Some(w3c_idx) = gilrs_btn_to_w3c(btn) {
-                            log::info!("Button {:?} pressed (W3C {})", btn, w3c_idx);
+                            log::info!("  -> W3C index {}", w3c_idx);
                             for mapping in mappings.iter() {
                                 if mapping.source_type == "button"
                                     && mapping.source_index == w3c_idx
@@ -311,14 +344,30 @@ fn gamepad_loop(app: AppHandle, state: Arc<AppState>) {
                                                 mapping.id.clone(),
                                                 mapping.key_code.clone(),
                                             );
+                                            log::info!("  -> Key pressed: {:?}", key);
                                         }
+                                    } else {
+                                        log::info!(
+                                            "  -> Key not found in key_map for: {}",
+                                            mapping.key_code
+                                        );
                                     }
                                 }
                             }
+                            if mappings
+                                .iter()
+                                .filter(|m| m.source_type == "button" && m.source_index == w3c_idx)
+                                .count()
+                                == 0
+                            {
+                                log::info!("  -> No mapping for W3C index {}", w3c_idx);
+                            }
+                        } else {
+                            log::info!("  -> No W3C mapping for button {:?}", btn);
                         }
                     } else if !is_now && was {
+                        log::info!("Button {:?} released", btn);
                         if let Some(w3c_idx) = gilrs_btn_to_w3c(btn) {
-                            log::info!("Button {:?} released (W3C {})", btn, w3c_idx);
                             let to_release: Vec<String> = pressed
                                 .iter()
                                 .filter(|(mid, _)| {
@@ -414,37 +463,6 @@ fn gamepad_loop(app: AppHandle, state: Arc<AppState>) {
                         axis_vals[i] = value;
                     }
                 }
-            }
-        }
-
-        while let Some(event) = gilrs.next_event() {
-            match event.event {
-                EventType::Connected => {
-                    log::info!("Gamepad connected (event): {:?}", event.id);
-                    if state.active_gamepad.read().unwrap().is_none() {
-                        *state.active_gamepad.write().unwrap() = Some(event.id);
-                        let _ = app.emit(
-                            "gamepad_status",
-                            serde_json::json!({"status": "connected", "active": true}),
-                        );
-                    }
-                }
-                EventType::Disconnected => {
-                    log::info!("Gamepad disconnected: {:?}", event.id);
-                    let active = state.active_gamepad.read().unwrap();
-                    if *active == Some(event.id) {
-                        drop(active);
-                        *state.active_gamepad.write().unwrap() = None;
-                        let _ = app.emit(
-                            "gamepad_status",
-                            serde_json::json!({"status": "disconnected", "active": false}),
-                        );
-                    }
-                    let eid: usize = event.id.into();
-                    last_button_states.remove(&eid);
-                    last_axis_values.remove(&eid);
-                }
-                _ => {}
             }
         }
 
