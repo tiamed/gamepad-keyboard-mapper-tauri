@@ -37,7 +37,7 @@ mod xinput_polling {
     use super::*;
     use xinput;
 
-    const XINPUT_BUTTON_MAP: [(u16, usize); 16] = [
+    const XINPUT_BUTTON_MAP: [(u16, usize); 15] = [
         (xinput::XINPUT_GAMEPAD_A, 0),
         (xinput::XINPUT_GAMEPAD_B, 1),
         (xinput::XINPUT_GAMEPAD_X, 2),
