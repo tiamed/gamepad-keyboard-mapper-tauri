@@ -67,16 +67,14 @@ mod xinput_polling {
 
     fn get_xinput_fn() -> Option<XInputGetStateFn> {
         static FN: OnceLock<Option<XInputGetStateFn>> = OnceLock::new();
-        *FN.get_or_init(|| {
+        *FN.get_or_init(|| unsafe {
             let lib = libloading::Library::new("xinput1_4.dll")
                 .or_else(|_| libloading::Library::new("xinput9_1_0.dll"))
                 .ok()?;
-            // Leak the library so the function pointer remains valid forever
+            let sym: libloading::Symbol<XInputGetStateFn> = lib.get(b"XInputGetState").ok()?;
+            let fn_ptr = *sym;
             std::mem::forget(lib);
-            unsafe {
-                let sym: libloading::Symbol<XInputGetStateFn> = lib.get(b"XInputGetState").ok()?;
-                Some(*sym)
-            }
+            Some(fn_ptr)
         })
     }
 
