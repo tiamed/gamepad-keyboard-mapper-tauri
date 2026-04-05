@@ -191,13 +191,11 @@ fn get_status(state: State<AppState>) -> (bool, usize, bool) {
 }
 
 #[tauri::command]
-fn list_gamepads() -> Vec<String> {
-    match Gilrs::new() {
-        Ok(gilrs) => gilrs
-            .gamepads()
-            .map(|(_id, gp)| gp.name().to_string())
-            .collect(),
-        Err(e) => vec![format!("gilrs init failed: {}", e)],
+fn list_gamepads(state: State<AppState>) -> Vec<String> {
+    let active = state.active_gamepad.read().unwrap();
+    match *active {
+        Some(id) => vec![format!("Active gamepad ID: {:?}", id)],
+        None => vec!["No gamepad detected by backend".to_string()],
     }
 }
 
@@ -226,40 +224,200 @@ fn gamepad_loop(app: AppHandle, state: Arc<AppState>) {
     };
 
     let mut pressed: HashMap<String, String> = HashMap::new();
-    let mut last_axes: HashMap<String, f32> = HashMap::new();
 
-    // Scan for already-connected gamepads
-    let mut gamepad_count = 0;
     for (id, gp) in gilrs.gamepads() {
-        gamepad_count += 1;
-        log::info!(
-            "Found already-connected gamepad {}: {:?} ({})",
-            gamepad_count,
-            id,
-            gp.name()
-        );
-        if gamepad_count == 1 {
+        log::info!("Found already-connected gamepad: {:?} ({})", id, gp.name());
+        if state.active_gamepad.read().unwrap().is_none() {
             *state.active_gamepad.write().unwrap() = Some(id);
             let _ = app.emit(
                 "gamepad_status",
                 serde_json::json!({"status": "connected", "active": true}),
             );
-            log::info!("Set active gamepad to {:?}", id);
         }
+        break;
     }
-    if gamepad_count == 0 {
-        log::info!("No gamepads connected at startup");
-    } else {
-        log::info!("Total gamepads found at startup: {}", gamepad_count);
-    }
+
+    let mut last_button_states: HashMap<usize, HashMap<gilrs::ev::Button, bool>> = HashMap::new();
+    let mut last_axis_values: HashMap<usize, [f32; 6]> = HashMap::new();
 
     loop {
-        while let Some(event) = gilrs.next_event() {
-            log::info!("Event received: {:?}", event.event);
-            let key_map = state.key_map.lock().unwrap();
-            let mappings = state.mappings.read().unwrap();
-            let enabled = *state.enabled.read().unwrap();
+        let mappings = state.mappings.read().unwrap();
+        let enabled = *state.enabled.read().unwrap();
+        let key_map = state.key_map.lock().unwrap();
 
+        for (id, gp) in gilrs.gamepads() {
+            let id_usize: usize = id.into();
+            if state.active_gamepad.read().unwrap().is_none() {
+                *state.active_gamepad.write().unwrap() = Some(id);
+                let _ = app.emit(
+                    "gamepad_status",
+                    serde_json::json!({"status": "connected", "active": true}),
+                );
+                log::info!("Gamepad detected: {:?}", id);
+            }
+
+            if !gp.is_connected() {
+                let active = state.active_gamepad.read().unwrap();
+                if *active == Some(id) {
+                    drop(active);
+                    *state.active_gamepad.write().unwrap() = None;
+                    let _ = app.emit(
+                        "gamepad_status",
+                        serde_json::json!({"status": "disconnected", "active": false}),
+                    );
+                }
+                last_button_states.remove(&id_usize);
+                last_axis_values.remove(&id_usize);
+                continue;
+            }
+
+            let btn_states = last_button_states.entry(id_usize).or_default();
+            let axis_vals = last_axis_values.entry(id_usize).or_insert([0.0; 6]);
+
+            if enabled {
+                let all_buttons = [
+                    gilrs::ev::Button::South,
+                    gilrs::ev::Button::East,
+                    gilrs::ev::Button::North,
+                    gilrs::ev::Button::West,
+                    gilrs::ev::Button::LeftTrigger,
+                    gilrs::ev::Button::RightTrigger,
+                    gilrs::ev::Button::Select,
+                    gilrs::ev::Button::Start,
+                    gilrs::ev::Button::LeftThumb,
+                    gilrs::ev::Button::RightThumb,
+                    gilrs::ev::Button::DPadUp,
+                    gilrs::ev::Button::DPadDown,
+                    gilrs::ev::Button::DPadLeft,
+                    gilrs::ev::Button::DPadRight,
+                    gilrs::ev::Button::Mode,
+                ];
+
+                for btn in all_buttons {
+                    let is_now = gp.is_pressed(btn);
+                    let was = btn_states.get(&btn).copied().unwrap_or(false);
+
+                    if is_now && !was {
+                        if let Some(w3c_idx) = gilrs_btn_to_w3c(btn) {
+                            log::info!("Button {:?} pressed (W3C {})", btn, w3c_idx);
+                            for mapping in mappings.iter() {
+                                if mapping.source_type == "button"
+                                    && mapping.source_index == w3c_idx
+                                {
+                                    if let Some(key) = resolve_key(&mapping.key_code, &key_map) {
+                                        if let Ok(mut enigo) = state.enigo.lock() {
+                                            let _ = enigo.key(key, Direction::Press);
+                                            pressed.insert(
+                                                mapping.id.clone(),
+                                                mapping.key_code.clone(),
+                                            );
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    } else if !is_now && was {
+                        if let Some(w3c_idx) = gilrs_btn_to_w3c(btn) {
+                            log::info!("Button {:?} released (W3C {})", btn, w3c_idx);
+                            let to_release: Vec<String> = pressed
+                                .iter()
+                                .filter(|(mid, _)| {
+                                    mappings.iter().any(|m| {
+                                        m.id == **mid
+                                            && m.source_type == "button"
+                                            && m.source_index == w3c_idx
+                                    })
+                                })
+                                .map(|(mid, _)| mid.clone())
+                                .collect();
+                            for mid in to_release {
+                                if let Some(kc) = pressed.remove(&mid) {
+                                    if let Some(key) = resolve_key(&kc, &key_map) {
+                                        if let Ok(mut enigo) = state.enigo.lock() {
+                                            let _ = enigo.key(key, Direction::Release);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    btn_states.insert(btn, is_now);
+                }
+
+                let axes = [
+                    gilrs::ev::Axis::LeftStickX,
+                    gilrs::ev::Axis::LeftStickY,
+                    gilrs::ev::Axis::RightStickX,
+                    gilrs::ev::Axis::RightStickY,
+                    gilrs::ev::Axis::LeftZ,
+                    gilrs::ev::Axis::RightZ,
+                ];
+
+                for (i, axis) in axes.iter().enumerate() {
+                    let value = gp.value(*axis);
+                    let last = axis_vals[i];
+                    let dz = 0.15;
+
+                    if (value - last).abs() > 0.01 {
+                        if last <= dz && value > dz {
+                            if let Some(m) = mappings
+                                .iter()
+                                .find(|m| m.source_type == "axis_positive" && m.source_index == i)
+                            {
+                                if let Some(key) = resolve_key(&m.key_code, &key_map) {
+                                    if let Ok(mut enigo) = state.enigo.lock() {
+                                        let _ = enigo.key(key, Direction::Press);
+                                        pressed.insert(m.id.clone(), m.key_code.clone());
+                                    }
+                                }
+                            }
+                        }
+                        if last > dz && value <= dz {
+                            if let Some(m) = mappings
+                                .iter()
+                                .find(|m| m.source_type == "axis_positive" && m.source_index == i)
+                            {
+                                if let Some(key) = resolve_key(&m.key_code, &key_map) {
+                                    if let Ok(mut enigo) = state.enigo.lock() {
+                                        let _ = enigo.key(key, Direction::Release);
+                                        pressed.remove(&m.id);
+                                    }
+                                }
+                            }
+                        }
+                        if last >= -dz && value < -dz {
+                            if let Some(m) = mappings
+                                .iter()
+                                .find(|m| m.source_type == "axis_negative" && m.source_index == i)
+                            {
+                                if let Some(key) = resolve_key(&m.key_code, &key_map) {
+                                    if let Ok(mut enigo) = state.enigo.lock() {
+                                        let _ = enigo.key(key, Direction::Press);
+                                        pressed.insert(m.id.clone(), m.key_code.clone());
+                                    }
+                                }
+                            }
+                        }
+                        if last < -dz && value >= -dz {
+                            if let Some(m) = mappings
+                                .iter()
+                                .find(|m| m.source_type == "axis_negative" && m.source_index == i)
+                            {
+                                if let Some(key) = resolve_key(&m.key_code, &key_map) {
+                                    if let Ok(mut enigo) = state.enigo.lock() {
+                                        let _ = enigo.key(key, Direction::Release);
+                                        pressed.remove(&m.id);
+                                    }
+                                }
+                            }
+                        }
+                        axis_vals[i] = value;
+                    }
+                }
+            }
+        }
+
+        while let Some(event) = gilrs.next_event() {
             match event.event {
                 EventType::Connected => {
                     log::info!("Gamepad connected (event): {:?}", event.id);
@@ -282,134 +440,14 @@ fn gamepad_loop(app: AppHandle, state: Arc<AppState>) {
                             serde_json::json!({"status": "disconnected", "active": false}),
                         );
                     }
-                }
-                EventType::ButtonPressed(btn, _) if enabled => {
-                    let w3c_idx = match gilrs_btn_to_w3c(btn) {
-                        Some(i) => i,
-                        None => continue,
-                    };
-
-                    if state.active_gamepad.read().unwrap().is_none() {
-                        *state.active_gamepad.write().unwrap() = Some(event.id);
-                        let _ = app.emit(
-                            "gamepad_status",
-                            serde_json::json!({"status": "connected", "active": true}),
-                        );
-                        log::info!("Gamepad connected via button press");
-                    }
-
-                    log::info!("Button pressed: {:?} -> W3C {}", btn, w3c_idx);
-                    for mapping in mappings.iter() {
-                        if mapping.source_type == "button" && mapping.source_index == w3c_idx {
-                            if let Some(key) = resolve_key(&mapping.key_code, &key_map) {
-                                if let Ok(mut enigo) = state.enigo.lock() {
-                                    let _ = enigo.key(key, Direction::Press);
-                                    pressed.insert(mapping.id.clone(), mapping.key_code.clone());
-                                    log::info!("Key pressed: {:?}", key);
-                                }
-                            }
-                        }
-                    }
-                }
-                EventType::ButtonReleased(btn, _) if enabled => {
-                    let w3c_idx = match gilrs_btn_to_w3c(btn) {
-                        Some(i) => i,
-                        None => continue,
-                    };
-
-                    log::info!("Button released: {:?} -> W3C {}", btn, w3c_idx);
-                    let to_release: Vec<String> = pressed
-                        .iter()
-                        .filter(|(id, _)| {
-                            mappings.iter().any(|m| {
-                                m.id == **id
-                                    && m.source_type == "button"
-                                    && m.source_index == w3c_idx
-                            })
-                        })
-                        .map(|(id, _)| id.clone())
-                        .collect();
-
-                    for id in to_release {
-                        if let Some(kc) = pressed.remove(&id) {
-                            if let Some(key) = resolve_key(&kc, &key_map) {
-                                if let Ok(mut enigo) = state.enigo.lock() {
-                                    let _ = enigo.key(key, Direction::Release);
-                                    log::info!("Key released: {:?}", key);
-                                }
-                            }
-                        }
-                    }
-                }
-                EventType::AxisChanged(axis, value, _) if enabled => {
-                    let dz = mappings
-                        .iter()
-                        .find(|m| {
-                            m.source_type == "axis_positive" && m.source_index == axis as usize
-                        })
-                        .and_then(|m| m.deadzone)
-                        .unwrap_or(0.15);
-
-                    let pos_key = format!("{}_pos", axis as usize);
-                    let neg_key = format!("{}_neg", axis as usize);
-                    let last_pos = last_axes.get(&pos_key).copied().unwrap_or(0.0);
-                    let last_neg = last_axes.get(&neg_key).copied().unwrap_or(0.0);
-
-                    if last_pos <= dz && value > dz {
-                        if let Some(m) = mappings.iter().find(|m| {
-                            m.source_type == "axis_positive" && m.source_index == axis as usize
-                        }) {
-                            if let Some(key) = resolve_key(&m.key_code, &key_map) {
-                                if let Ok(mut enigo) = state.enigo.lock() {
-                                    let _ = enigo.key(key, Direction::Press);
-                                    pressed.insert(m.id.clone(), m.key_code.clone());
-                                }
-                            }
-                        }
-                    }
-                    if last_pos > dz && value <= dz {
-                        if let Some(m) = mappings.iter().find(|m| {
-                            m.source_type == "axis_positive" && m.source_index == axis as usize
-                        }) {
-                            if let Some(key) = resolve_key(&m.key_code, &key_map) {
-                                if let Ok(mut enigo) = state.enigo.lock() {
-                                    let _ = enigo.key(key, Direction::Release);
-                                    pressed.remove(&m.id);
-                                }
-                            }
-                        }
-                    }
-                    if last_neg >= -dz && value < -dz {
-                        if let Some(m) = mappings.iter().find(|m| {
-                            m.source_type == "axis_negative" && m.source_index == axis as usize
-                        }) {
-                            if let Some(key) = resolve_key(&m.key_code, &key_map) {
-                                if let Ok(mut enigo) = state.enigo.lock() {
-                                    let _ = enigo.key(key, Direction::Press);
-                                    pressed.insert(m.id.clone(), m.key_code.clone());
-                                }
-                            }
-                        }
-                    }
-                    if last_neg < -dz && value >= -dz {
-                        if let Some(m) = mappings.iter().find(|m| {
-                            m.source_type == "axis_negative" && m.source_index == axis as usize
-                        }) {
-                            if let Some(key) = resolve_key(&m.key_code, &key_map) {
-                                if let Ok(mut enigo) = state.enigo.lock() {
-                                    let _ = enigo.key(key, Direction::Release);
-                                    pressed.remove(&m.id);
-                                }
-                            }
-                        }
-                    }
-
-                    last_axes.insert(pos_key, value);
-                    last_axes.insert(neg_key, value);
+                    let eid: usize = event.id.into();
+                    last_button_states.remove(&eid);
+                    last_axis_values.remove(&eid);
                 }
                 _ => {}
             }
         }
+
         thread::sleep(std::time::Duration::from_millis(16));
     }
 }
