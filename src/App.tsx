@@ -88,6 +88,28 @@ function App() {
     }
   }, [addToast])
 
+  // On mount, fetch current backend state to detect already-connected gamepad
+  useEffect(() => {
+    invoke<[boolean, number, boolean]>('get_status').then(([_enabled, _mappingCount, active]) => {
+      if (active) {
+        const dummyGamepad: Gamepad = {
+          id: 'Gamepad (Background)',
+          index: 0,
+          connected: true,
+          timestamp: Date.now(),
+          mapping: 'standard',
+          axes: [0, 0, 0, 0],
+          buttons: Array(17).fill({ pressed: false, touched: false, value: 0 }),
+          vibrationActuator: undefined as unknown as Gamepad['vibrationActuator'],
+        }
+        setGamepad(dummyGamepad)
+        // No toast here because this is just restoring state, not a new detection
+      }
+    }).catch(e => {
+      console.error('Failed to get backend status:', e)
+    })
+  }, [])
+
   useEffect(() => {
     invoke<string[]>('list_gamepads').then(names => {
       setDebugInfo(`gilrs sees: ${names.length ? names.join(', ') : 'none'}`)

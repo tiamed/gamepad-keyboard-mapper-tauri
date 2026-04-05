@@ -6,6 +6,8 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex, RwLock};
 use std::thread;
 use tauri::{AppHandle, Emitter, State};
+#[cfg(windows)]
+use xinput;
 
 /// Convert gilrs Button enum to W3C Gamepad API button index.
 /// Frontend stores mappings using W3C indices, so we must convert.
@@ -27,6 +29,184 @@ fn gilrs_btn_to_w3c(btn: Button) -> Option<usize> {
         Button::DPadRight => Some(15),
         Button::Mode => Some(16), // Home/Guide
         _ => None,
+    }
+}
+
+#[cfg(windows)]
+mod xinput_polling {
+    use super::*;
+    use xinput;
+
+    const XINPUT_BUTTON_MAP: [(u16, usize); 16] = [
+        (xinput::XINPUT_GAMEPAD_A, 0),
+        (xinput::XINPUT_GAMEPAD_B, 1),
+        (xinput::XINPUT_GAMEPAD_X, 2),
+        (xinput::XINPUT_GAMEPAD_Y, 3),
+        (xinput::XINPUT_GAMEPAD_LEFT_SHOULDER, 4),
+        (xinput::XINPUT_GAMEPAD_RIGHT_SHOULDER, 5),
+        (xinput::XINPUT_GAMEPAD_BACK, 8),
+        (xinput::XINPUT_GAMEPAD_START, 9),
+        (xinput::XINPUT_GAMEPAD_LEFT_THUMB, 10),
+        (xinput::XINPUT_GAMEPAD_RIGHT_THUMB, 11),
+        (xinput::XINPUT_GAMEPAD_DPAD_UP, 12),
+        (xinput::XINPUT_GAMEPAD_DPAD_DOWN, 13),
+        (xinput::XINPUT_GAMEPAD_DPAD_LEFT, 14),
+        (xinput::XINPUT_GAMEPAD_DPAD_RIGHT, 15),
+        (xinput::XINPUT_GAMEPAD_GUIDE, 16),
+    ];
+
+    pub fn xinput_buttons_to_w3c(buttons: u16) -> Vec<usize> {
+        XINPUT_BUTTON_MAP
+            .iter()
+            .filter_map(|&(mask, idx)| if buttons & mask != 0 { Some(idx) } else { None })
+            .collect()
+    }
+
+    /// Convert XInput state to axis values array [leftX, leftY, rightX, rightY, leftTrigger, rightTrigger]
+    /// Each axis value is normalized to -1.0..1.0.
+    pub fn xinput_state_to_axes(state: &xinput::State) -> [f32; 6] {
+        let gamepad = &state.gamepad;
+        let left_x = gamepad.s_thumb_lx as f32 / 32767.0;
+        let left_y = gamepad.s_thumb_ly as f32 / 32767.0;
+        let right_x = gamepad.s_thumb_rx as f32 / 32767.0;
+        let right_y = gamepad.s_thumb_ry as f32 / 32767.0;
+        // XInput triggers range 0-255, map to -1.0..1.0 to match gilrs axis mapping
+        let left_trigger = (gamepad.b_left_trigger as f32 - 128.0) / 128.0;
+        let right_trigger = (gamepad.b_right_trigger as f32 - 128.0) / 128.0;
+        [
+            left_x,
+            left_y,
+            right_x,
+            right_y,
+            left_trigger,
+            right_trigger,
+        ]
+    }
+
+    pub fn poll_xinput(
+        mappings: &[super::Mapping],
+        key_map: &std::collections::HashMap<String, super::Key>,
+        pressed: &mut std::collections::HashMap<String, String>,
+        enigo: &std::sync::Mutex<super::Enigo>,
+        enabled: bool,
+        last_buttons: &mut u16,
+        last_axes: &mut [f32; 6],
+    ) -> Result<(), xinput::Error> {
+        const DEADZONE: f32 = 0.15;
+
+        let state = xinput::get_state(0)?;
+        let buttons = state.gamepad.buttons;
+        let axes = xinput_state_to_axes(&state);
+
+        let changed = buttons ^ *last_buttons;
+        for &(mask, w3c_index) in XINPUT_BUTTON_MAP.iter() {
+            if changed & mask == 0 {
+                continue;
+            }
+            let is_pressed = buttons & mask != 0;
+            if !enabled {
+                continue;
+            }
+            if is_pressed {
+                for mapping in mappings.iter() {
+                    if mapping.source_type == "button" && mapping.source_index == w3c_index {
+                        if let Some(key) = super::resolve_key(&mapping.key_code, key_map) {
+                            if let Ok(mut enigo) = enigo.lock() {
+                                let _ = enigo.key(key, super::Direction::Press);
+                                pressed.insert(mapping.id.clone(), mapping.key_code.clone());
+                            }
+                        }
+                    }
+                }
+            } else {
+                let to_release: Vec<String> = pressed
+                    .iter()
+                    .filter(|(mid, _)| {
+                        mappings.iter().any(|m| {
+                            m.id == **mid
+                                && m.source_type == "button"
+                                && m.source_index == w3c_index
+                        })
+                    })
+                    .map(|(mid, _)| mid.clone())
+                    .collect();
+                for mid in to_release {
+                    if let Some(kc) = pressed.remove(&mid) {
+                        if let Some(key) = super::resolve_key(&kc, key_map) {
+                            if let Ok(mut enigo) = enigo.lock() {
+                                let _ = enigo.key(key, super::Direction::Release);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        if enabled {
+            for i in 0..6 {
+                let value = axes[i];
+                let last = last_axes[i];
+                if (value - last).abs() > 0.01 {
+                    if last <= DEADZONE && value > DEADZONE {
+                        if let Some(m) = mappings
+                            .iter()
+                            .find(|m| m.source_type == "axis_positive" && m.source_index == i)
+                        {
+                            if let Some(key) = super::resolve_key(&m.key_code, key_map) {
+                                if let Ok(mut enigo) = enigo.lock() {
+                                    let _ = enigo.key(key, super::Direction::Press);
+                                    pressed.insert(m.id.clone(), m.key_code.clone());
+                                }
+                            }
+                        }
+                    }
+                    if last > DEADZONE && value <= DEADZONE {
+                        if let Some(m) = mappings
+                            .iter()
+                            .find(|m| m.source_type == "axis_positive" && m.source_index == i)
+                        {
+                            if let Some(key) = super::resolve_key(&m.key_code, key_map) {
+                                if let Ok(mut enigo) = enigo.lock() {
+                                    let _ = enigo.key(key, super::Direction::Release);
+                                    pressed.remove(&m.id);
+                                }
+                            }
+                        }
+                    }
+                    if last >= -DEADZONE && value < -DEADZONE {
+                        if let Some(m) = mappings
+                            .iter()
+                            .find(|m| m.source_type == "axis_negative" && m.source_index == i)
+                        {
+                            if let Some(key) = super::resolve_key(&m.key_code, key_map) {
+                                if let Ok(mut enigo) = enigo.lock() {
+                                    let _ = enigo.key(key, super::Direction::Press);
+                                    pressed.insert(m.id.clone(), m.key_code.clone());
+                                }
+                            }
+                        }
+                    }
+                    if last < -DEADZONE && value >= -DEADZONE {
+                        if let Some(m) = mappings
+                            .iter()
+                            .find(|m| m.source_type == "axis_negative" && m.source_index == i)
+                        {
+                            if let Some(key) = super::resolve_key(&m.key_code, key_map) {
+                                if let Ok(mut enigo) = enigo.lock() {
+                                    let _ = enigo.key(key, super::Direction::Release);
+                                    pressed.remove(&m.id);
+                                }
+                            }
+                        }
+                    }
+                    last_axes[i] = value;
+                }
+            }
+        }
+
+        *last_buttons = buttons;
+        *last_axes = axes;
+        Ok(())
     }
 }
 
@@ -239,6 +419,10 @@ fn gamepad_loop(app: AppHandle, state: Arc<AppState>) {
 
     let mut last_button_states: HashMap<usize, HashMap<gilrs::ev::Button, bool>> = HashMap::new();
     let mut last_axis_values: HashMap<usize, [f32; 6]> = HashMap::new();
+    #[cfg(windows)]
+    let mut last_xinput_buttons: u16 = 0;
+    #[cfg(windows)]
+    let mut last_xinput_axes: [f32; 6] = [0.0; 6];
 
     loop {
         // Process events first to update internal state cache (critical for Windows XInput)
@@ -277,6 +461,25 @@ fn gamepad_loop(app: AppHandle, state: Arc<AppState>) {
         let enabled = *state.enabled.read().unwrap();
         let key_map = state.key_map.lock().unwrap();
 
+        #[cfg(windows)]
+        let xinput_connected = {
+            use xinput_polling::poll_xinput;
+            match poll_xinput(
+                &mappings,
+                &key_map,
+                &mut pressed,
+                &state.enigo,
+                enabled,
+                &mut last_xinput_buttons,
+                &mut last_xinput_axes,
+            ) {
+                Ok(()) => true,
+                Err(_) => false,
+            }
+        };
+        #[cfg(not(windows))]
+        let xinput_connected = false;
+
         for (id, gp) in gilrs.gamepads() {
             let id_usize: usize = id.into();
             if state.active_gamepad.read().unwrap().is_none() {
@@ -306,7 +509,7 @@ fn gamepad_loop(app: AppHandle, state: Arc<AppState>) {
             let btn_states = last_button_states.entry(id_usize).or_default();
             let axis_vals = last_axis_values.entry(id_usize).or_insert([0.0; 6]);
 
-            if enabled {
+            if !xinput_connected && enabled {
                 let all_buttons = [
                     gilrs::ev::Button::South,
                     gilrs::ev::Button::East,
@@ -463,6 +666,62 @@ fn gamepad_loop(app: AppHandle, state: Arc<AppState>) {
                         axis_vals[i] = value;
                     }
                 }
+            }
+        }
+
+        #[cfg(windows)]
+        {
+            if let Err(e) = xinput_polling::poll_xinput(
+                &mappings,
+                &key_map,
+                &mut pressed,
+                &state.enigo,
+                enabled,
+                &mut last_xinput_buttons,
+                &mut last_xinput_axes,
+            ) {
+                if state.active_gamepad.read().unwrap().is_some() {
+                    *state.active_gamepad.write().unwrap() = None;
+                    let _ = app.emit(
+                        "gamepad_status",
+                        serde_json::json!({"status": "disconnected", "active": false}),
+                    );
+                }
+            } else if state.active_gamepad.read().unwrap().is_none() {
+                *state.active_gamepad.write().unwrap() = Some(gilrs::GamepadId(0));
+                let _ = app.emit(
+                    "gamepad_status",
+                    serde_json::json!({"status": "connected", "active": true}),
+                );
+                log::info!("XInput gamepad detected");
+            }
+        }
+
+        #[cfg(windows)]
+        {
+            if let Err(e) = xinput_polling::poll_xinput(
+                &mappings,
+                &key_map,
+                &mut pressed,
+                &state.enigo,
+                enabled,
+                &mut last_xinput_buttons,
+                &mut last_xinput_axes,
+            ) {
+                if state.active_gamepad.read().unwrap().is_some() {
+                    *state.active_gamepad.write().unwrap() = None;
+                    let _ = app.emit(
+                        "gamepad_status",
+                        serde_json::json!({"status": "disconnected", "active": false}),
+                    );
+                }
+            } else if state.active_gamepad.read().unwrap().is_none() {
+                *state.active_gamepad.write().unwrap() = Some(gilrs::GamepadId(0));
+                let _ = app.emit(
+                    "gamepad_status",
+                    serde_json::json!({"status": "connected", "active": true}),
+                );
+                log::info!("XInput gamepad detected");
             }
         }
 
