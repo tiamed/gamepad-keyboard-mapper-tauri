@@ -1,11 +1,14 @@
 use enigo::{Direction, Enigo, Key, Keyboard, Settings};
-use gilrs::ev::Button;
-use gilrs::{EventType, Gilrs};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, RwLock};
 use std::thread;
 use tauri::{AppHandle, Emitter, State};
+
+#[cfg(not(windows))]
+use gilrs::ev::Button;
+#[cfg(not(windows))]
+use gilrs::{EventType, Gilrs};
 
 #[cfg(windows)]
 mod xinput_polling {
@@ -226,6 +229,7 @@ mod xinput_polling {
 
 /// Convert gilrs Button enum to W3C Gamepad API button index.
 /// Frontend stores mappings using W3C indices, so we must convert.
+#[cfg(not(windows))]
 fn gilrs_btn_to_w3c(btn: Button) -> Option<usize> {
     match btn {
         Button::South => Some(0),        // A
@@ -698,7 +702,7 @@ fn gamepad_loop(app: AppHandle, state: Arc<AppState>) {
             let enabled = *state.enabled.read().unwrap();
             let key_map = state.key_map.lock().unwrap();
 
-            if let Ok((buttons, axes)) = xinput_polling::poll_xinput(
+            if let Ok((buttons, _axes)) = xinput_polling::poll_xinput(
                 &mappings,
                 &key_map,
                 &mut pressed,
