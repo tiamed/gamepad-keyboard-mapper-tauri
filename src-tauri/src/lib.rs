@@ -81,7 +81,25 @@ mod xinput_polling {
         })
     }
 
+    pub fn detect_connected_user(preferred: Option<u32>) -> Option<u32> {
+        let get_state = get_xinput_fn()?;
+        let order = if let Some(u) = preferred {
+            [u, (u + 1) % 4, (u + 2) % 4, (u + 3) % 4]
+        } else {
+            [0, 1, 2, 3]
+        };
+        for user_index in order {
+            let mut state: XInputState = unsafe { zeroed() };
+            let result = unsafe { get_state(user_index, &mut state) };
+            if result == 0 {
+                return Some(user_index);
+            }
+        }
+        None
+    }
+
     pub fn poll_xinput(
+        user_index: u32,
         mappings: &[Mapping],
         key_map: &HashMap<String, Key>,
         pressed: &mut HashMap<String, String>,
@@ -90,12 +108,11 @@ mod xinput_polling {
         last_buttons: &mut u16,
         last_axes: &mut [f32; 6],
     ) -> Result<(u16, [f32; 6]), String> {
-        const DEADZONE: f32 = 0.15;
         const XINPUT_DEADZONE: f32 = 7849.0;
 
         let get_state = get_xinput_fn().ok_or("XInput not available")?;
         let mut state: XInputState = unsafe { zeroed() };
-        let result = unsafe { get_state(0, &mut state) };
+        let result = unsafe { get_state(user_index, &mut state) };
         if result != 0 {
             return Err(format!("XInputGetState failed: {}", result));
         }
@@ -165,11 +182,12 @@ mod xinput_polling {
                 };
                 let last = last_axes[i];
                 if (value - last).abs() > 0.01 {
-                    if last <= DEADZONE && value > DEADZONE {
-                        if let Some(m) = mappings
-                            .iter()
-                            .find(|m| m.source_type == "axis_positive" && m.source_index == i)
-                        {
+                    for m in mappings
+                        .iter()
+                        .filter(|m| m.source_type == "axis_positive" && m.source_index == i)
+                    {
+                        let dz = super::mapping_deadzone(m, 0.15);
+                        if last <= dz && value > dz {
                             if let Some(key) = resolve_key(&m.key_code, key_map) {
                                 if let Ok(mut en) = enigo.lock() {
                                     let _ = en.key(key, Direction::Press);
@@ -177,12 +195,7 @@ mod xinput_polling {
                                 }
                             }
                         }
-                    }
-                    if last > DEADZONE && value <= DEADZONE {
-                        if let Some(m) = mappings
-                            .iter()
-                            .find(|m| m.source_type == "axis_positive" && m.source_index == i)
-                        {
+                        if last > dz && value <= dz {
                             if let Some(key) = resolve_key(&m.key_code, key_map) {
                                 if let Ok(mut en) = enigo.lock() {
                                     let _ = en.key(key, Direction::Release);
@@ -191,11 +204,12 @@ mod xinput_polling {
                             }
                         }
                     }
-                    if last >= -DEADZONE && value < -DEADZONE {
-                        if let Some(m) = mappings
-                            .iter()
-                            .find(|m| m.source_type == "axis_negative" && m.source_index == i)
-                        {
+                    for m in mappings
+                        .iter()
+                        .filter(|m| m.source_type == "axis_negative" && m.source_index == i)
+                    {
+                        let dz = super::mapping_deadzone(m, 0.15);
+                        if last >= -dz && value < -dz {
                             if let Some(key) = resolve_key(&m.key_code, key_map) {
                                 if let Ok(mut en) = enigo.lock() {
                                     let _ = en.key(key, Direction::Press);
@@ -203,12 +217,7 @@ mod xinput_polling {
                                 }
                             }
                         }
-                    }
-                    if last < -DEADZONE && value >= -DEADZONE {
-                        if let Some(m) = mappings
-                            .iter()
-                            .find(|m| m.source_type == "axis_negative" && m.source_index == i)
-                        {
+                        if last < -dz && value >= -dz {
                             if let Some(key) = resolve_key(&m.key_code, key_map) {
                                 if let Ok(mut en) = enigo.lock() {
                                     let _ = en.key(key, Direction::Release);
@@ -256,7 +265,10 @@ struct AppState {
     key_map: Mutex<HashMap<String, Key>>,
     mappings: RwLock<Vec<Mapping>>,
     enabled: RwLock<bool>,
+    #[cfg(not(windows))]
     active_gamepad: RwLock<Option<gilrs::GamepadId>>,
+    #[cfg(windows)]
+    active_xinput_user: RwLock<Option<u32>>,
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -407,16 +419,30 @@ fn set_enabled(enabled: bool, state: State<'_, Arc<AppState>>) {
 fn get_status(state: State<'_, Arc<AppState>>) -> (bool, usize, bool) {
     let enabled = *state.enabled.read().unwrap();
     let len = state.mappings.read().unwrap().len();
+    #[cfg(not(windows))]
     let active = state.active_gamepad.read().unwrap().is_some();
+    #[cfg(windows)]
+    let active = state.active_xinput_user.read().unwrap().is_some();
     (enabled, len, active)
 }
 
 #[tauri::command]
 fn list_gamepads(state: State<'_, Arc<AppState>>) -> Vec<String> {
+    #[cfg(not(windows))]
+    {
     let active = state.active_gamepad.read().unwrap();
     match *active {
         Some(id) => vec![format!("Active gamepad ID: {:?}", id)],
         None => vec!["No gamepad detected by backend".to_string()],
+    }
+    }
+    #[cfg(windows)]
+    {
+        let active = state.active_xinput_user.read().unwrap();
+        match *active {
+            Some(user_index) => vec![format!("Active XInput user: {}", user_index)],
+            None => vec!["No gamepad detected by backend".to_string()],
+        }
     }
 }
 
@@ -430,6 +456,40 @@ fn test_key(key_code: &str, state: State<'_, Arc<AppState>>) -> Result<(), Strin
     enigo
         .key(key, Direction::Click)
         .map_err(|e| format!("{:?}", e))
+}
+
+fn release_pressed_keys(
+    pressed: &mut HashMap<String, String>,
+    key_map: &HashMap<String, Key>,
+    enigo: &Mutex<Enigo>,
+) {
+    let keys_to_release: Vec<String> = pressed.drain().map(|(_, key_code)| key_code).collect();
+    if let Ok(mut enigo) = enigo.lock() {
+        for key_code in keys_to_release {
+            if let Some(key) = resolve_key(&key_code, key_map) {
+                let _ = enigo.key(key, Direction::Release);
+            }
+        }
+    }
+}
+
+fn mapping_deadzone(mapping: &Mapping, fallback: f32) -> f32 {
+    mapping.deadzone.unwrap_or(fallback).clamp(0.0, 1.0)
+}
+
+fn emit_input_reset(app: &AppHandle) {
+    for button_index in 0..17 {
+        let _ = app.emit(
+            "button_event",
+            serde_json::json!({"button_index": button_index, "pressed": false}),
+        );
+    }
+    for axis_index in 0..6 {
+        let _ = app.emit(
+            "axis_event",
+            serde_json::json!({"axis_index": axis_index, "value": 0.0}),
+        );
+    }
 }
 
 fn gamepad_loop(app: AppHandle, state: Arc<AppState>) {
@@ -447,6 +507,7 @@ fn gamepad_loop(app: AppHandle, state: Arc<AppState>) {
         };
 
         let mut pressed: HashMap<String, String> = HashMap::new();
+        let mut was_enabled = true;
 
         if let Some((id, gp)) = gilrs.gamepads().next() {
             log::info!("Found already-connected gamepad: {:?} ({})", id, gp.name());
@@ -486,6 +547,7 @@ fn gamepad_loop(app: AppHandle, state: Arc<AppState>) {
                                 "gamepad_status",
                                 serde_json::json!({"status": "disconnected", "active": false}),
                             );
+                            emit_input_reset(&app);
                         }
                         let eid: usize = event.id.into();
                         last_button_states.remove(&eid);
@@ -498,10 +560,15 @@ fn gamepad_loop(app: AppHandle, state: Arc<AppState>) {
             let mappings = state.mappings.read().unwrap();
             let enabled = *state.enabled.read().unwrap();
             let key_map = state.key_map.lock().unwrap();
+            if was_enabled && !enabled {
+                release_pressed_keys(&mut pressed, &key_map, &state.enigo);
+            }
+            was_enabled = enabled;
 
             for (id, gp) in gilrs.gamepads() {
                 let id_usize: usize = id.into();
-                if state.active_gamepad.read().unwrap().is_none() {
+                let is_active_missing = state.active_gamepad.read().unwrap().is_none();
+                if is_active_missing {
                     *state.active_gamepad.write().unwrap() = Some(id);
                     let _ = app.emit(
                         "gamepad_status",
@@ -519,6 +586,7 @@ fn gamepad_loop(app: AppHandle, state: Arc<AppState>) {
                             "gamepad_status",
                             serde_json::json!({"status": "disconnected", "active": false}),
                         );
+                        emit_input_reset(&app);
                     }
                     last_button_states.remove(&id_usize);
                     last_axis_values.remove(&id_usize);
@@ -554,6 +622,10 @@ fn gamepad_loop(app: AppHandle, state: Arc<AppState>) {
                         if is_now && !was {
                             log::info!("Button {:?} pressed", btn);
                             if let Some(w3c_idx) = gilrs_btn_to_w3c(btn) {
+                                let _ = app.emit(
+                                    "button_event",
+                                    serde_json::json!({"button_index": w3c_idx, "pressed": true}),
+                                );
                                 log::info!("  -> W3C index {}", w3c_idx);
                                 for mapping in mappings.iter() {
                                     if mapping.source_type == "button"
@@ -593,6 +665,10 @@ fn gamepad_loop(app: AppHandle, state: Arc<AppState>) {
                         } else if !is_now && was {
                             log::info!("Button {:?} released", btn);
                             if let Some(w3c_idx) = gilrs_btn_to_w3c(btn) {
+                                let _ = app.emit(
+                                    "button_event",
+                                    serde_json::json!({"button_index": w3c_idx, "pressed": false}),
+                                );
                                 let to_release: Vec<String> = pressed
                                     .iter()
                                     .filter(|(mid, _)| {
@@ -630,13 +706,17 @@ fn gamepad_loop(app: AppHandle, state: Arc<AppState>) {
                     for (i, axis) in axes.iter().enumerate() {
                         let value = gp.value(*axis);
                         let last = axis_vals[i];
-                        let dz = 0.15;
 
                         if (value - last).abs() > 0.01 {
-                            if last <= dz && value > dz {
-                                if let Some(m) = mappings.iter().find(|m| {
-                                    m.source_type == "axis_positive" && m.source_index == i
-                                }) {
+                            let _ = app.emit(
+                                "axis_event",
+                                serde_json::json!({"axis_index": i, "value": value}),
+                            );
+                            for m in mappings.iter().filter(|m| {
+                                m.source_type == "axis_positive" && m.source_index == i
+                            }) {
+                                let dz = mapping_deadzone(m, 0.15);
+                                if last <= dz && value > dz {
                                     if let Some(key) = resolve_key(&m.key_code, &key_map) {
                                         if let Ok(mut enigo) = state.enigo.lock() {
                                             let _ = enigo.key(key, Direction::Press);
@@ -644,11 +724,7 @@ fn gamepad_loop(app: AppHandle, state: Arc<AppState>) {
                                         }
                                     }
                                 }
-                            }
-                            if last > dz && value <= dz {
-                                if let Some(m) = mappings.iter().find(|m| {
-                                    m.source_type == "axis_positive" && m.source_index == i
-                                }) {
+                                if last > dz && value <= dz {
                                     if let Some(key) = resolve_key(&m.key_code, &key_map) {
                                         if let Ok(mut enigo) = state.enigo.lock() {
                                             let _ = enigo.key(key, Direction::Release);
@@ -657,10 +733,12 @@ fn gamepad_loop(app: AppHandle, state: Arc<AppState>) {
                                     }
                                 }
                             }
-                            if last >= -dz && value < -dz {
-                                if let Some(m) = mappings.iter().find(|m| {
-                                    m.source_type == "axis_negative" && m.source_index == i
-                                }) {
+
+                            for m in mappings.iter().filter(|m| {
+                                m.source_type == "axis_negative" && m.source_index == i
+                            }) {
+                                let dz = mapping_deadzone(m, 0.15);
+                                if last >= -dz && value < -dz {
                                     if let Some(key) = resolve_key(&m.key_code, &key_map) {
                                         if let Ok(mut enigo) = state.enigo.lock() {
                                             let _ = enigo.key(key, Direction::Press);
@@ -668,11 +746,7 @@ fn gamepad_loop(app: AppHandle, state: Arc<AppState>) {
                                         }
                                     }
                                 }
-                            }
-                            if last < -dz && value >= -dz {
-                                if let Some(m) = mappings.iter().find(|m| {
-                                    m.source_type == "axis_negative" && m.source_index == i
-                                }) {
+                                if last < -dz && value >= -dz {
                                     if let Some(key) = resolve_key(&m.key_code, &key_map) {
                                         if let Ok(mut enigo) = state.enigo.lock() {
                                             let _ = enigo.key(key, Direction::Release);
@@ -696,55 +770,107 @@ fn gamepad_loop(app: AppHandle, state: Arc<AppState>) {
         let mut pressed: HashMap<String, String> = HashMap::new();
         let mut last_xinput_buttons: u16 = 0;
         let mut last_xinput_axes: [f32; 6] = [0.0; 6];
+        let mut was_enabled = true;
+        let mut active_xinput_user: Option<u32> = None;
+        let mut had_connected_user = false;
 
         loop {
             let mappings = state.mappings.read().unwrap();
             let enabled = *state.enabled.read().unwrap();
             let key_map = state.key_map.lock().unwrap();
+            if was_enabled && !enabled {
+                release_pressed_keys(&mut pressed, &key_map, &state.enigo);
+            }
+            was_enabled = enabled;
 
             let prev_buttons = last_xinput_buttons;
             let prev_axes = last_xinput_axes;
 
-            if let Ok((buttons, axes)) = xinput_polling::poll_xinput(
-                &mappings,
-                &key_map,
-                &mut pressed,
-                &state.enigo,
-                enabled,
-                &mut last_xinput_buttons,
-                &mut last_xinput_axes,
-            ) {
-                if state.active_gamepad.read().unwrap().is_none() {
-                    // Create a dummy GamepadId for XInput (Windows doesn't use gilrs)
-                    // GamepadId is a tuple struct around usize, use transmute to create it
-                    let dummy_id: gilrs::GamepadId = unsafe { std::mem::transmute(0usize) };
-                    *state.active_gamepad.write().unwrap() = Some(dummy_id);
+            let connected_user = xinput_polling::detect_connected_user(active_xinput_user);
+            if let Some(user_index) = connected_user {
+                if active_xinput_user != Some(user_index) {
+                    release_pressed_keys(&mut pressed, &key_map, &state.enigo);
+                    emit_input_reset(&app);
+                    last_xinput_buttons = 0;
+                    last_xinput_axes = [0.0; 6];
+                    active_xinput_user = Some(user_index);
+                }
+
+                if let Ok((buttons, axes)) = xinput_polling::poll_xinput(
+                    user_index,
+                    &mappings,
+                    &key_map,
+                    &mut pressed,
+                    &state.enigo,
+                    enabled,
+                    &mut last_xinput_buttons,
+                    &mut last_xinput_axes,
+                ) {
+                    let current_active = *state.active_xinput_user.read().unwrap();
+                    if current_active.is_none() {
+                        let _ = app.emit(
+                            "gamepad_status",
+                            serde_json::json!({"status": "connected", "active": true}),
+                        );
+                    }
+                    if current_active != Some(user_index) {
+                        *state.active_xinput_user.write().unwrap() = Some(user_index);
+                    }
+                    had_connected_user = true;
+                    // Use prev_buttons (before poll_xinput updated last_xinput_buttons)
+                    // to correctly detect which buttons changed
+                    let changed = buttons ^ prev_buttons;
+                    for &(mask, w3c_idx) in xinput_polling::XINPUT_BUTTON_MAP.iter() {
+                        if changed & mask != 0 {
+                            let is_now = buttons & mask != 0;
+                            let _ = app.emit(
+                                "button_event",
+                                serde_json::json!({"button_index": w3c_idx, "pressed": is_now}),
+                            );
+                        }
+                    }
+                    // Emit axis events for analog values (triggers, sticks)
+                    for i in 0..6 {
+                        if (axes[i] - prev_axes[i]).abs() > 0.01 {
+                            let _ = app.emit(
+                                "axis_event",
+                                serde_json::json!({"axis_index": i, "value": axes[i]}),
+                            );
+                        }
+                    }
+                } else {
+                    let mut active = state.active_xinput_user.write().unwrap();
+                    if active.is_some() {
+                        *active = None;
+                        let _ = app.emit(
+                            "gamepad_status",
+                            serde_json::json!({"status": "disconnected", "active": false}),
+                        );
+                        emit_input_reset(&app);
+                    }
+                    drop(active);
+                    active_xinput_user = None;
+                    had_connected_user = false;
+                    release_pressed_keys(&mut pressed, &key_map, &state.enigo);
+                    last_xinput_buttons = 0;
+                    last_xinput_axes = [0.0; 6];
+                }
+            } else {
+                let mut active = state.active_xinput_user.write().unwrap();
+                if active.is_some() || had_connected_user {
+                    *active = None;
                     let _ = app.emit(
                         "gamepad_status",
-                        serde_json::json!({"status": "connected", "active": true}),
+                        serde_json::json!({"status": "disconnected", "active": false}),
                     );
+                    emit_input_reset(&app);
                 }
-                // Use prev_buttons (before poll_xinput updated last_xinput_buttons)
-                // to correctly detect which buttons changed
-                let changed = buttons ^ prev_buttons;
-                for &(mask, w3c_idx) in xinput_polling::XINPUT_BUTTON_MAP.iter() {
-                    if changed & mask != 0 {
-                        let is_now = buttons & mask != 0;
-                        let _ = app.emit(
-                            "button_event",
-                            serde_json::json!({"button_index": w3c_idx, "pressed": is_now}),
-                        );
-                    }
-                }
-                // Emit axis events for analog values (triggers, sticks)
-                for i in 0..6 {
-                    if (axes[i] - prev_axes[i]).abs() > 0.01 {
-                        let _ = app.emit(
-                            "axis_event",
-                            serde_json::json!({"axis_index": i, "value": axes[i]}),
-                        );
-                    }
-                }
+                drop(active);
+                active_xinput_user = None;
+                had_connected_user = false;
+                release_pressed_keys(&mut pressed, &key_map, &state.enigo);
+                last_xinput_buttons = 0;
+                last_xinput_axes = [0.0; 6];
             }
 
             thread::sleep(std::time::Duration::from_millis(16));
@@ -764,7 +890,10 @@ pub fn run() {
         key_map: Mutex::new(key_map),
         mappings: RwLock::new(Vec::new()),
         enabled: RwLock::new(true),
+        #[cfg(not(windows))]
         active_gamepad: RwLock::new(None),
+        #[cfg(windows)]
+        active_xinput_user: RwLock::new(None),
     });
 
     let state_clone = Arc::clone(&state);
