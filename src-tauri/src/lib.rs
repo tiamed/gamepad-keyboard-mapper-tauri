@@ -702,7 +702,10 @@ fn gamepad_loop(app: AppHandle, state: Arc<AppState>) {
             let enabled = *state.enabled.read().unwrap();
             let key_map = state.key_map.lock().unwrap();
 
-            if let Ok((buttons, _axes)) = xinput_polling::poll_xinput(
+            let prev_buttons = last_xinput_buttons;
+            let prev_axes = last_xinput_axes;
+
+            if let Ok((buttons, axes)) = xinput_polling::poll_xinput(
                 &mappings,
                 &key_map,
                 &mut pressed,
@@ -721,13 +724,24 @@ fn gamepad_loop(app: AppHandle, state: Arc<AppState>) {
                         serde_json::json!({"status": "connected", "active": true}),
                     );
                 }
-                let changed = buttons ^ last_xinput_buttons;
-                for (mask, w3c_idx) in xinput_polling::XINPUT_BUTTON_MAP.iter() {
+                // Use prev_buttons (before poll_xinput updated last_xinput_buttons)
+                // to correctly detect which buttons changed
+                let changed = buttons ^ prev_buttons;
+                for &(mask, w3c_idx) in xinput_polling::XINPUT_BUTTON_MAP.iter() {
                     if changed & mask != 0 {
                         let is_now = buttons & mask != 0;
                         let _ = app.emit(
                             "button_event",
                             serde_json::json!({"button_index": w3c_idx, "pressed": is_now}),
+                        );
+                    }
+                }
+                // Emit axis events for analog values (triggers, sticks)
+                for i in 0..6 {
+                    if (axes[i] - prev_axes[i]).abs() > 0.01 {
+                        let _ = app.emit(
+                            "axis_event",
+                            serde_json::json!({"axis_index": i, "value": axes[i]}),
                         );
                     }
                 }

@@ -12,6 +12,7 @@ import './GamepadVisual.css'
 interface GamepadVisualProps {
   gamepad: Gamepad | null
   pressedButtons?: Set<number>
+  axisValues?: number[]
   onButtonClick: (buttonIndex: number, buttonName: GamepadButton) => void
   onAxisClick: (axisIndex: number, axisName: GamepadAxis) => void
 }
@@ -28,6 +29,7 @@ interface AxisState {
 export function GamepadVisual({
   gamepad,
   pressedButtons,
+  axisValues,
   onButtonClick,
   onAxisClick,
 }: GamepadVisualProps) {
@@ -93,6 +95,25 @@ export function GamepadVisual({
     return `${baseClass} ${isPressed || isBackendPressed ? 'pressed' : ''}`
   }
 
+  // Use backend axis values as fallback when browser Gamepad API is unavailable
+  // axisValues: [LeftStickX, LeftStickY, RightStickX, RightStickY, LeftTrigger, RightTrigger]
+  const getAxisValue = (index: number): number => {
+    const browserVal = axisStates[index]?.value ?? 0
+    if (Math.abs(browserVal) > 0.01) return browserVal
+    // Map backend axis indices to frontend axis indices
+    // Backend: 0=LX, 1=LY, 2=RX, 3=RY, 4=LT, 5=RT
+    // Frontend axisStates: 0=LX, 1=LY, 2=RX, 3=RY (only 4 stick axes)
+    return axisValues?.[index] ?? 0
+  }
+
+  // Get trigger value from backend (axes 4=LT, 5=RT)
+  const getTriggerValue = (buttonIndex: number): number => {
+    const browserVal = buttonStates[buttonIndex]?.value ?? 0
+    if (browserVal > 0.01) return browserVal
+    const axisIdx = buttonIndex === 6 ? 4 : 5 // LT=axis4, RT=axis5
+    return axisValues?.[axisIdx] ?? 0
+  }
+
   return (
     <div className="gamepad-visual">
       <div className="gamepad-top-section">
@@ -106,7 +127,7 @@ export function GamepadVisual({
           <div
             className="trigger-fill"
             style={{
-              height: `${(buttonStates[6]?.value ?? 0) * 100}%`,
+              height: `${getTriggerValue(6) * 100}%`,
             }}
           />
         </button>
@@ -121,7 +142,7 @@ export function GamepadVisual({
           <div
             className="trigger-fill"
             style={{
-              height: `${(buttonStates[7]?.value ?? 0) * 100}%`,
+              height: `${getTriggerValue(7) * 100}%`,
             }}
           />
         </button>
@@ -192,8 +213,8 @@ export function GamepadVisual({
             <div
               className="stick-nub"
               style={{
-                transform: `translate(${(axisStates[0]?.value ?? 0) * 15}px, ${
-                  (axisStates[1]?.value ?? 0) * 15
+                transform: `translate(${getAxisValue(0) * 15}px, ${
+                  getAxisValue(1) * 15
                 }px)`,
               }}
             >
@@ -278,8 +299,8 @@ export function GamepadVisual({
             <div
               className="stick-nub"
               style={{
-                transform: `translate(${(axisStates[2]?.value ?? 0) * 15}px, ${
-                  (axisStates[3]?.value ?? 0) * 15
+                transform: `translate(${getAxisValue(2) * 15}px, ${
+                  getAxisValue(3) * 15
                 }px)`,
               }}
             >

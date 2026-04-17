@@ -46,6 +46,7 @@ function App() {
   const [toasts, setToasts] = useState<{ id: string; msg: string; type: 'info' | 'error' | 'success' }[]>([])
   const [debugInfo, setDebugInfo] = useState<string>('')
   const [pressedButtons, setPressedButtons] = useState<Set<number>>(new Set())
+  const [axisValues, setAxisValues] = useState<number[]>([0, 0, 0, 0, 0, 0])
 
   const addToast = useCallback((msg: string, type: 'info' | 'error' | 'success' = 'info') => {
     const id = generateId()
@@ -83,6 +84,10 @@ function App() {
         setGamepad(null)
         addToast('Gamepad disconnected', 'error')
       }
+      // Refresh debug info when gamepad status changes
+      invoke<string[]>('list_gamepads').then(names => {
+        setDebugInfo(`gilrs sees: ${names.length ? names.join(', ') : 'none'}`)
+      }).catch(() => {})
     })
     return () => {
       unlisten.then(fn => fn())
@@ -134,6 +139,20 @@ function App() {
           newSet.delete(button_index)
         }
         return newSet
+      })
+    })
+    return () => {
+      unlisten.then(fn => fn())
+    }
+  }, [])
+
+  useEffect(() => {
+    const unlisten = listen<{ axis_index: number; value: number }>('axis_event', (event) => {
+      const { axis_index, value } = event.payload
+      setAxisValues(prev => {
+        const next = [...prev]
+        next[axis_index] = value
+        return next
       })
     })
     return () => {
@@ -259,6 +278,7 @@ function App() {
         <GamepadVisual
           gamepad={gamepad}
           pressedButtons={pressedButtons}
+          axisValues={axisValues}
           onButtonClick={handleButtonClick}
           onAxisClick={handleAxisClick}
         />
